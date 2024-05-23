@@ -57,7 +57,7 @@ private:
 
     std::function<StatusOr<ChunkPtr>()> _convert_hash_map_to_chunk();
 
-    Status publish_runtime_filters(RuntimeState* state);
+    [[nodiscard]] Status publish_runtime_filters(RuntimeState* state);
 
     Status append_hash_columns(const ChunkPtr& chunk);
 
@@ -66,6 +66,7 @@ private:
     ChunkSharedSlice _hash_table_build_chunk_slice;
     std::function<StatusOr<ChunkPtr>()> _hash_table_slice_iterator;
     bool _is_first_time_spill = true;
+    DECLARE_ONCE_DETECTOR(_set_finishing_once);
 };
 
 class SpillableHashJoinBuildOperatorFactory final : public HashJoinBuildOperatorFactory {

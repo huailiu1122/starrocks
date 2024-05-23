@@ -49,7 +49,7 @@ struct TransmitChunkInfo {
     // a same exchange source fragment instance, so we should use fragment_instance_id
     // of the destination as the key of destination instead of channel_id.
     TUniqueId fragment_instance_id;
-    doris::PBackendService_Stub* brpc_stub;
+    PInternalService_Stub* brpc_stub;
     PTransmitChunkParamsPtr params;
     butil::IOBuf attachment;
     int64_t attachment_physical_bytes;
@@ -111,7 +111,7 @@ private:
 
     // Try to send rpc if buffer is not empty and channel is not busy
     // And we need to put this function and other extra works(pre_works) together as an atomic operation
-    Status _try_to_send_rpc(const TUniqueId& instance_id, const std::function<void()>& pre_works);
+    [[nodiscard]] Status _try_to_send_rpc(const TUniqueId& instance_id, const std::function<void()>& pre_works);
 
     // send by rpc or http
     Status _send_rpc(DisposableClosure<PTransmitChunkResult, ClosureContext>* closure, const TransmitChunkInfo& req);
@@ -123,8 +123,6 @@ private:
     // `accumulated_network_time / average_concurrency`
     // And we just pick the maximum accumulated_network_time among all destination
     int64_t _network_time();
-
-    void _try_to_merge_query_statistics(TransmitChunkInfo& request);
 
     FragmentContext* _fragment_ctx;
     MemTracker* const _mem_tracker;
@@ -158,6 +156,7 @@ private:
     phmap::flat_hash_map<int64_t, int32_t> _num_in_flight_rpcs;
     phmap::flat_hash_map<int64_t, TimeTrace> _network_times;
     phmap::flat_hash_map<int64_t, std::unique_ptr<Mutex>> _mutexes;
+    phmap::flat_hash_map<int64_t, TNetworkAddress> _dest_addrs;
 
     // True means that SinkBuffer needn't input chunk and send chunk anymore,
     // but there may be still in-flight RPC running.
@@ -190,7 +189,10 @@ private:
     int64_t _first_send_time = -1;
     int64_t _last_receive_time = -1;
     int64_t _rpc_http_min_size = 0;
-    std::shared_ptr<QueryStatistics> _eos_query_stats = std::make_shared<QueryStatistics>();
+
+    std::atomic<int64_t> _request_sequence = 0;
+    int64_t _sent_audit_stats_frequency = 1;
+    int64_t _sent_audit_stats_frequency_upper_limit = 64;
 };
 
 } // namespace starrocks::pipeline

@@ -164,8 +164,8 @@ Status MapColumnIterator::next_batch(const SparseRange<>& range, Column* dst) {
         // if array column in nullable or element of array is empty, element_read_range may be empty.
         // so we should reseek the element_ordinal
         if (element_read_range.span_size() == 0) {
-            _keys->seek_to_ordinal(element_ordinal);
-            _values->seek_to_ordinal(element_ordinal);
+            RETURN_IF_ERROR(_keys->seek_to_ordinal(element_ordinal));
+            RETURN_IF_ERROR(_values->seek_to_ordinal(element_ordinal));
         }
         // 2. Read offset column
         // [1, 2, 3], [4, 5, 6]
@@ -305,12 +305,6 @@ Status MapColumnIterator::seek_to_ordinal(ordinal_t ord) {
     size_t element_ordinal = _offsets->element_ordinal();
     RETURN_IF_ERROR(_keys->seek_to_ordinal(element_ordinal));
     RETURN_IF_ERROR(_values->seek_to_ordinal(element_ordinal));
-    return Status::OK();
-}
-
-Status MapColumnIterator::get_row_ranges_by_zone_map(const std::vector<const ColumnPredicate*>& predicates,
-                                                     const ColumnPredicate* del_predicate, SparseRange<>* row_ranges) {
-    row_ranges->add({0, static_cast<rowid_t>(_reader->num_rows())});
     return Status::OK();
 }
 

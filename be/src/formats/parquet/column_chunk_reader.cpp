@@ -14,16 +14,24 @@
 
 #include "formats/parquet/column_chunk_reader.h"
 
-#include <memory>
+#include <glog/logging.h>
 
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include "common/compiler_util.h"
 #include "common/status.h"
-#include "exec/hdfs_scanner.h"
-#include "formats/parquet/column_reader.h"
+#include "common/statusor.h"
 #include "formats/parquet/encoding.h"
 #include "formats/parquet/types.h"
 #include "formats/parquet/utils.h"
+#include "fs/fs.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/current_thread.h"
+#include "runtime/mem_tracker.h"
+#include "util/compression/block_compression.h"
 
 namespace starrocks::parquet {
 
@@ -33,7 +41,9 @@ ColumnChunkReader::ColumnChunkReader(level_t max_def_level, level_t max_rep_leve
           _max_rep_level(max_rep_level),
           _type_length(type_length),
           _chunk_metadata(column_chunk),
-          _opts(opts) {}
+          _opts(opts),
+          _def_level_decoder(&opts.stats->level_decode_ns),
+          _rep_level_decoder(&opts.stats->level_decode_ns) {}
 
 ColumnChunkReader::~ColumnChunkReader() = default;
 
@@ -46,10 +56,11 @@ Status ColumnChunkReader::init(int chunk_size) {
     }
     int64_t size = metadata().total_compressed_size;
     int64_t num_values = metadata().num_values;
-    _page_reader = std::make_unique<PageReader>(_opts.file->stream().get(), start_offset, size, num_values);
+    _stream = _opts.file->stream().get();
+    _page_reader = std::make_unique<PageReader>(_stream, start_offset, size, num_values, _opts.stats);
 
     // seek to the first page
-    _page_reader->seek_to_offset(start_offset);
+    RETURN_IF_ERROR(_page_reader->seek_to_offset(start_offset));
 
     auto compress_type = convert_compression_codec(metadata().codec);
     RETURN_IF_ERROR(get_block_compression_codec(compress_type, &_compress_codec));
@@ -89,7 +100,7 @@ Status ColumnChunkReader::skip_page() {
 }
 
 Status ColumnChunkReader::next_page() {
-    if (_page_parse_state != PAGE_DATA_PARSED) {
+    if (_page_parse_state != PAGE_DATA_PARSED && _page_parse_state == PAGE_HEADER_PARSED) {
         _opts.stats->page_skip += 1;
     }
     _page_parse_state = PAGE_DATA_PARSED;
@@ -97,6 +108,7 @@ Status ColumnChunkReader::next_page() {
 }
 
 Status ColumnChunkReader::_parse_page_header() {
+    SCOPED_RAW_TIMER(&_opts.stats->page_read_ns);
     DCHECK(_page_parse_state == INITIALIZED || _page_parse_state == PAGE_DATA_PARSED);
     size_t off = _page_reader->get_offset();
     RETURN_IF_ERROR(_page_reader->next_header());
@@ -119,6 +131,7 @@ Status ColumnChunkReader::_parse_page_header() {
 }
 
 Status ColumnChunkReader::_parse_page_data() {
+    SCOPED_RAW_TIMER(&_opts.stats->page_read_ns);
     switch (_page_reader->current_header()->type) {
     case tparquet::PageType::DATA_PAGE:
         RETURN_IF_ERROR(_parse_data_page());
@@ -148,8 +161,9 @@ Status ColumnChunkReader::_read_and_decompress_page_data(uint32_t compressed_siz
     Slice read_data;
     auto ret = _page_reader->peek(read_size);
     if (ret.ok() && ret.value().size() == read_size) {
+        _opts.stats->bytes_read += read_size;
         // peek dos not advance offset.
-        _page_reader->skip_bytes(read_size);
+        RETURN_IF_ERROR(_page_reader->skip_bytes(read_size));
         read_data = Slice(ret.value().data(), read_size);
     } else {
         read_buffer.reserve(read_size);
@@ -211,7 +225,7 @@ Status ColumnChunkReader::_parse_data_page() {
     }
 
     _cur_decoder->set_type_length(_type_length);
-    _cur_decoder->set_data(_data);
+    RETURN_IF_ERROR(_cur_decoder->set_data(_data));
 
     _page_parse_state = PAGE_DATA_PARSED;
     return Status::OK();
@@ -243,7 +257,7 @@ Status ColumnChunkReader::_parse_dict_page() {
     const EncodingInfo* code_info = nullptr;
     RETURN_IF_ERROR(EncodingInfo::get(metadata().type, dict_encoding, &code_info));
     RETURN_IF_ERROR(code_info->create_decoder(&dict_decoder));
-    dict_decoder->set_data(_data);
+    RETURN_IF_ERROR(dict_decoder->set_data(_data));
     dict_decoder->set_type_length(_type_length);
 
     // initialize decoder
@@ -273,6 +287,18 @@ Status ColumnChunkReader::_try_load_dictionary() {
 
     RETURN_IF_ERROR(_parse_dict_page());
     return Status::OK();
+}
+
+Status ColumnChunkReader::load_dictionary_page() {
+    if (_dict_page_parsed) {
+        return Status::OK();
+    }
+
+    RETURN_IF_ERROR(_parse_page_header());
+    if (UNLIKELY(!current_page_is_dict())) {
+        return Status::InternalError("Not a dictionary page in dictionary page offset");
+    }
+    return _parse_dict_page();
 }
 
 bool ColumnChunkReader::current_page_is_dict() {

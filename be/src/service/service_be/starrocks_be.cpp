@@ -24,9 +24,9 @@
 #include "block_cache/block_cache.h"
 #include "common/config.h"
 #include "common/daemon.h"
-#include "common/logging.h"
 #include "common/status.h"
 #include "exec/pipeline/query_context.h"
+#include "gutil/strings/join.h"
 #include "runtime/exec_env.h"
 #include "runtime/fragment_mgr.h"
 #include "runtime/jdbc_driver_manager.h"
@@ -38,6 +38,7 @@
 #include "service/staros_worker.h"
 #include "storage/storage_engine.h"
 #include "util/logging.h"
+#include "util/mem_info.h"
 #include "util/thrift_rpc_helper.h"
 #include "util/thrift_server.h"
 
@@ -45,49 +46,78 @@ namespace brpc {
 
 DECLARE_uint64(max_body_size);
 DECLARE_int64(socket_max_unwritten_bytes);
+DECLARE_bool(socket_keepalive);
 
 } // namespace brpc
 
 namespace starrocks {
 
-void init_block_cache() {
+Status init_datacache(GlobalEnv* global_env, const std::vector<StorePath>& storage_paths) {
+    if (!config::datacache_enable && config::block_cache_enable) {
+        config::datacache_enable = true;
+        config::datacache_mem_size = std::to_string(config::block_cache_mem_size);
+        config::datacache_disk_size = std::to_string(config::block_cache_disk_size);
+        config::datacache_disk_path = config::block_cache_disk_path;
+        config::datacache_meta_path = config::block_cache_meta_path;
+        config::datacache_block_size = config::block_cache_block_size;
+        config::datacache_max_concurrent_inserts = config::block_cache_max_concurrent_inserts;
+        config::datacache_checksum_enable = config::block_cache_checksum_enable;
+        config::datacache_direct_io_enable = config::block_cache_direct_io_enable;
+        config::datacache_engine = config::block_cache_engine;
+        LOG(WARNING) << "The configuration items prefixed with `block_cache_` will be deprecated soon"
+                     << ", you'd better use the configuration items prefixed `datacache` instead!";
+    }
+
 #if !defined(WITH_CACHELIB) && !defined(WITH_STARCACHE)
-    if (config::block_cache_enable) {
-        config::block_cache_enable = false;
+    if (config::datacache_enable) {
+        LOG(WARNING) << "No valid engines supported, skip initializing datacache module";
+        config::datacache_enable = false;
     }
 #endif
 
-    if (config::block_cache_enable) {
+    if (config::datacache_enable) {
         BlockCache* cache = BlockCache::instance();
+
         CacheOptions cache_options;
-        cache_options.mem_space_size = config::block_cache_mem_size;
-
-        std::vector<std::string> paths;
-        EXIT_IF_ERROR(parse_conf_block_cache_paths(config::block_cache_disk_path, &paths));
-
-        for (auto& p : paths) {
-            cache_options.disk_spaces.push_back(
-                    {.path = p, .size = static_cast<size_t>(config::block_cache_disk_size)});
+        int64_t mem_limit = MemInfo::physical_mem();
+        if (global_env->process_mem_tracker()->has_limit()) {
+            mem_limit = global_env->process_mem_tracker()->limit();
         }
+        cache_options.mem_space_size = parse_conf_datacache_mem_size(config::datacache_mem_size, mem_limit);
+        if (config::datacache_disk_path.value().empty()) {
+            // If the disk cache does not be configured for datacache, set default path according storage path.
+            std::vector<std::string> datacache_paths;
+            std::for_each(storage_paths.begin(), storage_paths.end(), [&](const StorePath& root_path) {
+                std::filesystem::path sp(root_path.path);
+                auto dp = sp.parent_path() / "datacache";
+                datacache_paths.push_back(dp.string());
+            });
+            config::datacache_disk_path = JoinStrings(datacache_paths, ";");
+        }
+        RETURN_IF_ERROR(parse_conf_datacache_disk_spaces(config::datacache_disk_path, config::datacache_disk_size,
+                                                         config::ignore_broken_disk, &cache_options.disk_spaces));
 
         // Adjust the default engine based on build switches.
-        if (config::block_cache_engine == "") {
+        if (config::datacache_engine == "") {
 #if defined(WITH_STARCACHE)
-            config::block_cache_engine = "starcache";
+            config::datacache_engine = "starcache";
 #else
-            config::block_cache_engine = "cachelib";
+            config::datacache_engine = "cachelib";
 #endif
         }
-        cache_options.meta_path = config::block_cache_meta_path;
-        cache_options.block_size = config::block_cache_block_size;
-        cache_options.max_parcel_memory_mb = config::block_cache_max_parcel_memory_mb;
-        cache_options.max_concurrent_inserts = config::block_cache_max_concurrent_inserts;
-        cache_options.lru_insertion_point = config::block_cache_lru_insertion_point;
-        cache_options.enable_checksum = config::block_cache_checksum_enable;
-        cache_options.enable_direct_io = config::block_cache_direct_io_enable;
-        cache_options.engine = config::block_cache_engine;
-        EXIT_IF_ERROR(cache->init(cache_options));
+        cache_options.meta_path = config::datacache_meta_path;
+        cache_options.block_size = config::datacache_block_size;
+        cache_options.max_flying_memory_mb = config::datacache_max_flying_memory_mb;
+        cache_options.max_concurrent_inserts = config::datacache_max_concurrent_inserts;
+        cache_options.enable_checksum = config::datacache_checksum_enable;
+        cache_options.enable_direct_io = config::datacache_direct_io_enable;
+        cache_options.enable_tiered_cache = config::datacache_tiered_cache_enable;
+        cache_options.skip_read_factor = starrocks::config::datacache_skip_read_factor;
+        cache_options.scheduler_threads_per_cpu = starrocks::config::datacache_scheduler_threads_per_cpu;
+        cache_options.engine = config::datacache_engine;
+        return cache->init(cache_options);
     }
+    return Status::OK();
 }
 
 StorageEngine* init_storage_engine(GlobalEnv* global_env, std::vector<StorePath> paths, bool as_cn) {
@@ -104,6 +134,8 @@ StorageEngine* init_storage_engine(GlobalEnv* global_env, std::vector<StorePath>
 
     return engine;
 }
+
+extern void shutdown_tracer();
 
 void start_be(const std::vector<StorePath>& paths, bool as_cn) {
     std::string process_name = as_cn ? "CN" : "BE";
@@ -143,16 +175,29 @@ void start_be(const std::vector<StorePath>& paths, bool as_cn) {
 
 #ifdef USE_STAROS
     init_staros_worker();
-    LOG(INFO) << process_name << " start step" << start_step++ << ": staros worker init successfully";
+    LOG(INFO) << process_name << " start step " << start_step++ << ": staros worker init successfully";
 #endif
 
-    init_block_cache();
-    LOG(INFO) << process_name << " start step " << start_step++ << ": block cache init successfully";
+    if (!init_datacache(global_env, paths).ok()) {
+        LOG(ERROR) << "Fail to init datacache";
+        exit(1);
+    }
+    if (config::datacache_enable) {
+        LOG(INFO) << process_name << " start step " << start_step++ << ": datacache init successfully";
+    } else {
+        LOG(INFO) << process_name << " starts by skipping the datacache initialization";
+    }
 
     // Start thrift server
-    auto thrift_server = BackendService::create<BackendService>(exec_env, config::be_port);
+    int thrift_port = config::be_port;
+    if (as_cn && config::thrift_port != 0) {
+        thrift_port = config::thrift_port;
+        LOG(WARNING) << "'thrift_port' is deprecated, please update be.conf to use 'be_port' instead!";
+    }
+    auto thrift_server = BackendService::create<BackendService>(exec_env, thrift_port);
+
     if (auto status = thrift_server->start(); !status.ok()) {
-        LOG(ERROR) << "Fail to start BackendService thrift server on port " << config::be_port << ": " << status;
+        LOG(ERROR) << "Fail to start BackendService thrift server on port " << thrift_port << ": " << status;
         shutdown_logging();
         exit(1);
     }
@@ -160,12 +205,18 @@ void start_be(const std::vector<StorePath>& paths, bool as_cn) {
 
     // Start brpc server
     brpc::FLAGS_max_body_size = config::brpc_max_body_size;
+
+    // Configure keepalive.
+#ifdef WITH_BRPC_KEEPALIVE
+    brpc::FLAGS_socket_keepalive = config::brpc_socket_keepalive;
+#endif
+
     brpc::FLAGS_socket_max_unwritten_bytes = config::brpc_socket_max_unwritten_bytes;
     auto brpc_server = std::make_unique<brpc::Server>();
 
     BackendInternalServiceImpl<PInternalService> internal_service(exec_env);
     BackendInternalServiceImpl<doris::PBackendService> backend_service(exec_env);
-    LakeServiceImpl lake_service(exec_env);
+    LakeServiceImpl lake_service(exec_env, exec_env->lake_tablet_manager());
 
     brpc_server->AddService(&internal_service, brpc::SERVER_DOESNT_OWN_SERVICE);
     brpc_server->AddService(&backend_service, brpc::SERVER_DOESNT_OWN_SERVICE);
@@ -175,7 +226,24 @@ void start_be(const std::vector<StorePath>& paths, bool as_cn) {
     if (config::brpc_num_threads != -1) {
         options.num_threads = config::brpc_num_threads;
     }
-    if (auto ret = brpc_server->Start(config::brpc_port, &options); ret != 0) {
+    const auto lake_service_max_concurrency = config::lake_service_max_concurrency;
+    const auto service_name = "starrocks.LakeService";
+    const auto methods = {
+            "abort_txn",     "abort_compaction", "compact",         "drop_table",          "delete_data",
+            "delete_tablet", "get_tablet_stats", "publish_version", "publish_log_version", "publish_log_version_batch",
+            "vacuum",        "vacuum_full"};
+    for (auto method : methods) {
+        brpc_server->MaxConcurrencyOf(service_name, method) = lake_service_max_concurrency;
+    }
+    int brpc_port = config::brpc_port;
+    butil::EndPoint point;
+    if (butil::str2endpoint(BackendOptions::get_service_bind_address(), brpc_port, &point) < 0) {
+        LOG(ERROR) << "Fail to convert address. Please check your backend config.";
+        shutdown_logging();
+        exit(1);
+    }
+    LOG(INFO) << "BRPC server bind to host: " << BackendOptions::get_service_bind_address() << ", port: " << brpc_port;
+    if (auto ret = brpc_server->Start(point, &options); ret != 0) {
         LOG(ERROR) << "BRPC service did not start correctly, exiting errcoe: " << ret;
         shutdown_logging();
         exit(1);
@@ -230,19 +298,6 @@ void start_be(const std::vector<StorePath>& paths, bool as_cn) {
     brpc_server->Stop(0);
     thrift_server->stop();
 
-    http_server->join();
-    LOG(INFO) << process_name << " exit step " << exit_step++ << ": http server exit successfully";
-
-    brpc_server->Join();
-    LOG(INFO) << process_name << " exit step " << exit_step++ << ": brpc server exit successfully";
-
-    thrift_server->join();
-    LOG(INFO) << process_name << " exit step " << exit_step++ << ": thrift server exit successfully";
-
-    http_server.reset();
-    brpc_server.reset();
-    thrift_server.reset();
-
     daemon->stop();
     daemon.reset();
     LOG(INFO) << process_name << " exit step " << exit_step++ << ": daemon threads exit successfully";
@@ -259,13 +314,27 @@ void start_be(const std::vector<StorePath>& paths, bool as_cn) {
 #endif
 
 #if defined(WITH_CACHELIB) || defined(WITH_STARCACHE)
-    if (config::block_cache_enable) {
-        BlockCache::instance()->shutdown();
-        LOG(INFO) << process_name << " exit step " << exit_step++ << ": block cache shutdown successfully";
+    if (config::datacache_enable) {
+        (void)BlockCache::instance()->shutdown();
+        LOG(INFO) << process_name << " exit step " << exit_step++ << ": datacache shutdown successfully";
     }
 #endif
 
+    http_server->join();
+    http_server.reset();
+    LOG(INFO) << process_name << " exit step " << exit_step++ << ": http server exit successfully";
+
+    brpc_server->Join();
+    brpc_server.reset();
+    LOG(INFO) << process_name << " exit step " << exit_step++ << ": brpc server exit successfully";
+
+    thrift_server->join();
+    thrift_server.reset();
+    LOG(INFO) << process_name << " exit step " << exit_step++ << ": thrift server exit successfully";
+
     exec_env->destroy();
+    LOG(INFO) << process_name << " exit step " << exit_step++ << ": exec env destroy successfully";
+
     delete storage_engine;
 
     // Unbind with MemTracker
@@ -273,6 +342,8 @@ void start_be(const std::vector<StorePath>& paths, bool as_cn) {
 
     global_env->stop();
     LOG(INFO) << process_name << " exit step " << exit_step++ << ": global env stop successfully";
+
+    shutdown_tracer();
 
     LOG(INFO) << process_name << " exited successfully";
 }

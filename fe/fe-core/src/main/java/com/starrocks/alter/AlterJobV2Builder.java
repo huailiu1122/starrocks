@@ -39,6 +39,8 @@ public abstract class AlterJobV2Builder {
     protected Map<Long, List<Column>> newIndexSchema = new HashMap<>();
     protected Map<Long, Short> newIndexShortKeyCount = new HashMap<>();
     protected List<Integer> sortKeyIdxes;
+    protected long warehouseId;
+    protected List<Integer> sortKeyUniqueIds;
 
     public AlterJobV2Builder() {
     }
@@ -85,13 +87,33 @@ public abstract class AlterJobV2Builder {
         return this;
     }
 
+    public AlterJobV2Builder withNewIndexShortKeyCount(Map<Long, Short> shortKeyCount) {
+        this.newIndexShortKeyCount.putAll(shortKeyCount);
+        return this;
+    }
+
     public AlterJobV2Builder withNewIndexSchema(long indexId, @NotNull List<Column> indexSchema) {
         newIndexSchema.put(indexId, indexSchema);
         return this;
     }
 
+    public AlterJobV2Builder withNewIndexSchema(@NotNull Map<Long, List<Column>> indexSchema) {
+        newIndexSchema.putAll(indexSchema);
+        return this;
+    }
+
     public AlterJobV2Builder withSortKeyIdxes(@Nullable List<Integer> sortKeyIdxes) {
         this.sortKeyIdxes = sortKeyIdxes;
+        return this;
+    }
+
+    public AlterJobV2Builder withWarehouse(@Nullable long warehouseId) {
+        this.warehouseId = warehouseId;
+        return this;
+    }
+
+    public AlterJobV2Builder withSortKeyUniqueIds(@Nullable List<Integer> sortKeyUniqueIds) {
+        this.sortKeyUniqueIds = sortKeyUniqueIds;
         return this;
     }
 

@@ -1,25 +1,3 @@
-[sql]
-select
-    o_orderpriority,
-    count(*) as order_count
-from
-    orders
-where
-        o_orderdate >= date '1994-09-01'
-  and o_orderdate < date '1994-12-01'
-  and exists (
-        select
-            *
-        from
-            lineitem
-        where
-                l_orderkey = o_orderkey
-          and l_receiptdate > l_commitdate
-    )
-group by
-    o_orderpriority
-order by
-    o_orderpriority ;
 [fragment statistics]
 PLAN FRAGMENT 0(F06)
 Output Exprs:6: o_orderpriority | 27: count
@@ -122,7 +100,7 @@ OutPut Exchange Id: 05
 3:HdfsScanNode
 TABLE: orders
 NON-PARTITION PREDICATES: 5: o_orderdate >= '1994-09-01', 5: o_orderdate < '1994-12-01'
-MIN/MAX PREDICATES: 28: o_orderdate >= '1994-09-01', 29: o_orderdate < '1994-12-01'
+MIN/MAX PREDICATES: 5: o_orderdate >= '1994-09-01', 5: o_orderdate < '1994-12-01'
 partitions=1/1
 avgRowSize=27.0
 cardinality: 5675676

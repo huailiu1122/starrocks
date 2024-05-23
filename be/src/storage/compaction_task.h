@@ -52,6 +52,7 @@ struct CompactionTaskInfo {
     CompactionTaskState state{COMPACTION_INIT};
     uint64_t task_id{0};
     Version output_version;
+    int64_t gtid{0};
     uint64_t elapsed_time{0};
     int64_t tablet_id{0};
     double compaction_score{0};
@@ -103,6 +104,7 @@ struct CompactionTaskInfo {
         ss << ", state:" << compaction_state_to_string(state);
         ss << ", compaction_type:" << starrocks::to_string(compaction_type);
         ss << ", output_version:" << output_version;
+        ss << ", gtid:" << gtid;
         ss << ", start_time:" << ToStringFromUnixMillis(start_time);
         ss << ", end_time:" << ToStringFromUnixMillis(end_time);
         ss << ", elapsed_time:" << elapsed_time << " us";
@@ -209,6 +211,8 @@ public:
 
     void set_mem_tracker(MemTracker* mem_tracker) { _mem_tracker = mem_tracker; }
 
+    void set_tablet_schema(TabletSchemaCSPtr& tablet_schema) { _tablet_schema = tablet_schema; }
+
     std::string get_task_info() {
         _task_info.elapsed_time = _watch.elapsed_time() / 1000;
         return _task_info.to_string();
@@ -225,9 +229,9 @@ protected:
 
     void _try_lock() {
         if (_task_info.compaction_type == CUMULATIVE_COMPACTION) {
-            _compaction_lock = std::unique_lock(_tablet->get_cumulative_lock(), std::try_to_lock);
+            _compaction_lock = std::shared_lock(_tablet->get_cumulative_lock(), std::try_to_lock);
         } else {
-            _compaction_lock = std::unique_lock(_tablet->get_base_lock(), std::try_to_lock);
+            _compaction_lock = std::shared_lock(_tablet->get_base_lock(), std::try_to_lock);
         }
     }
 
@@ -248,10 +252,21 @@ protected:
         return Status::OK();
     }
 
-    void _commit_compaction() {
+    Status _commit_compaction() {
         std::stringstream input_stream_info;
         {
             std::unique_lock wrlock(_tablet->get_header_lock());
+            // check input_rowsets exist. If not, tablet_meta maybe modify by some other thread, cancel this task
+            for (auto& rowset : _input_rowsets) {
+                if (_tablet->get_rowset_by_version(rowset->version()) == nullptr) {
+                    input_stream_info << "rowset:" << rowset->version()
+                                      << " is not exist in tablet:" << _tablet->tablet_id()
+                                      << ", maybe tablet meta is modify by other thread. cancel this compaction task";
+                    LOG(WARNING) << input_stream_info.str();
+                    return Status::InternalError(input_stream_info.str());
+                }
+            }
+
             // after one success compaction, low cardinality dict will be generated.
             // so we can enable shortcut compaction.
             _tablet->tablet_meta()->set_enable_shortcut_compaction(true);
@@ -274,6 +289,8 @@ protected:
                 << ", output rowset version:" << _output_rowset->version()
                 << ", input rowsets:" << input_stream_info.str() << ", input rowsets size:" << _input_rowsets.size()
                 << ", max_version:" << _tablet->max_continuous_version();
+
+        return Status::OK();
     }
 
     void _success_callback();
@@ -287,8 +304,9 @@ protected:
     RuntimeProfile _runtime_profile;
     std::vector<RowsetSharedPtr> _input_rowsets;
     TabletSharedPtr _tablet;
+    TabletSchemaCSPtr _tablet_schema;
     RowsetSharedPtr _output_rowset;
-    std::unique_lock<std::mutex> _compaction_lock;
+    std::shared_lock<std::shared_mutex> _compaction_lock;
     MonotonicStopWatch _watch;
     MemTracker* _mem_tracker{nullptr};
 };

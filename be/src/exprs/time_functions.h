@@ -19,6 +19,7 @@
 #include "exprs/builtin_functions.h"
 #include "exprs/function_context.h"
 #include "exprs/function_helper.h"
+#include "runtime/datetime_value.h"
 #include "types/logical_type.h"
 #include "util/timezone_hsscan.h"
 namespace starrocks {
@@ -155,6 +156,15 @@ public:
     DEFINE_VECTORIZED_FN(week_of_year);
 
     /**
+     * Get yearweek.
+     * @param context
+     * @param columns [TimestampColumn] Columns that hold timestamps.
+     * @return  IntColumn year_week:
+     */
+    DEFINE_VECTORIZED_FN(year_week_with_default_mode);
+    DEFINE_VECTORIZED_FN(year_week_with_mode);
+
+    /**
      * Get week of the year.
      * @param context
      * @param column[0] [TimestampColumn] Columns that hold timestamps.
@@ -232,6 +242,8 @@ public:
      * Called by datetime_trunc
      * Truncate to the corresponding part
      */
+    DEFINE_VECTORIZED_FN(datetime_trunc_microsecond);
+    DEFINE_VECTORIZED_FN(datetime_trunc_millisecond);
     DEFINE_VECTORIZED_FN(datetime_trunc_second);
     DEFINE_VECTORIZED_FN(datetime_trunc_minute);
     DEFINE_VECTORIZED_FN(datetime_trunc_hour);
@@ -255,6 +267,8 @@ public:
      * Called by time_slice
      * Floor to the corresponding period
      */
+    DEFINE_VECTORIZED_FN(time_slice_datetime_start_microsecond);
+    DEFINE_VECTORIZED_FN(time_slice_datetime_start_millisecond);
     DEFINE_VECTORIZED_FN(time_slice_datetime_start_second);
     DEFINE_VECTORIZED_FN(time_slice_datetime_start_minute);
     DEFINE_VECTORIZED_FN(time_slice_datetime_start_hour);
@@ -264,6 +278,8 @@ public:
     DEFINE_VECTORIZED_FN(time_slice_datetime_start_week);
     DEFINE_VECTORIZED_FN(time_slice_datetime_start_quarter);
 
+    DEFINE_VECTORIZED_FN(time_slice_datetime_end_microsecond);
+    DEFINE_VECTORIZED_FN(time_slice_datetime_end_millisecond);
     DEFINE_VECTORIZED_FN(time_slice_datetime_end_second);
     DEFINE_VECTORIZED_FN(time_slice_datetime_end_minute);
     DEFINE_VECTORIZED_FN(time_slice_datetime_end_hour);
@@ -273,6 +289,8 @@ public:
     DEFINE_VECTORIZED_FN(time_slice_datetime_end_week);
     DEFINE_VECTORIZED_FN(time_slice_datetime_end_quarter);
 
+    DEFINE_VECTORIZED_FN(time_slice_date_start_microsecond);
+    DEFINE_VECTORIZED_FN(time_slice_date_start_millisecond);
     DEFINE_VECTORIZED_FN(time_slice_date_start_second);
     DEFINE_VECTORIZED_FN(time_slice_date_start_minute);
     DEFINE_VECTORIZED_FN(time_slice_date_start_hour);
@@ -282,6 +300,8 @@ public:
     DEFINE_VECTORIZED_FN(time_slice_date_start_week);
     DEFINE_VECTORIZED_FN(time_slice_date_start_quarter);
 
+    DEFINE_VECTORIZED_FN(time_slice_date_end_microsecond);
+    DEFINE_VECTORIZED_FN(time_slice_date_end_millisecond);
     DEFINE_VECTORIZED_FN(time_slice_date_end_second);
     DEFINE_VECTORIZED_FN(time_slice_date_end_minute);
     DEFINE_VECTORIZED_FN(time_slice_date_end_hour);
@@ -337,6 +357,28 @@ public:
      * @return  DateColumn  Date that corresponds to the timestamp.
      */
     DEFINE_VECTORIZED_FN(to_date);
+
+    /**
+     * date to_tera_date(varchar, varchar)
+     * @param context
+     * @param columns [VARCHAR] Columns that hold timestamps, [VARCHAR] Columns that hold constant date foramt.
+     * @return  DateColumn  Date that corresponds to the timestamp.
+     */
+
+    DEFINE_VECTORIZED_FN(to_tera_date);
+    static Status to_tera_date_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
+    static Status to_tera_date_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
+
+    /**
+     * datetime to_tera_timestamp(varchar, varchar)
+     * @param context
+     * @param columns [VARCHAR] Columns that hold timestamps, [VARCHAR] Columns that hold constant date foramt.
+     * @return  DateColumn  Date that corresponds to the timestamp.
+     */
+
+    DEFINE_VECTORIZED_FN(to_tera_timestamp);
+    static Status to_tera_timestamp_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
+    static Status to_tera_timestamp_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
     /**
      * Calculate days from the first timestamp to the second timestamp. Only the date part of the timestamps are used in calculation.
@@ -538,21 +580,16 @@ public:
      */
     DEFINE_VECTORIZED_FN(to_days);
 
-    // try to transfer content to date format based on "%Y-%m-%d",
+    // try to transfer content to date format based on "%Y-%m-%d" or "%Y-%m-%d %H:%i:%s",
     // if successful, return result TimestampValue
     // else take a uncommon approach to process this content.
+    template <bool isYYYYMMDD>
     static StatusOr<ColumnPtr> str_to_date_from_date_format(FunctionContext* context, const starrocks::Columns& columns,
                                                             const char* str_format);
 
-    // try to transfer content to date format based on "%Y-%m-%d %H:%i:%s",
-    // if successful, return result TimestampValue
-    // else take a uncommon approach to process this content.
-    static StatusOr<ColumnPtr> str_to_date_from_datetime_format(FunctionContext* context,
-                                                                const starrocks::Columns& columns,
-                                                                const char* str_format);
-
     // Try to process string content, based on uncommon string format
     static StatusOr<ColumnPtr> str_to_date_uncommon(FunctionContext* context, const starrocks::Columns& columns);
+
     /**
      *
      * cast string to datetime
@@ -568,6 +605,13 @@ public:
      *
      */
     DEFINE_VECTORIZED_FN(str2date);
+
+    /**
+     * Joda Time parse
+     */
+    DEFINE_VECTORIZED_FN(parse_jodatime);
+    static Status parse_joda_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
+    static Status parse_joda_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
 
     static bool is_date_format(const Slice& slice, char** start);
     static bool is_datetime_format(const Slice& slice, char** start);
@@ -659,6 +703,7 @@ public:
      */
     DEFINE_VECTORIZED_FN(from_unix_to_datetime_64);
     DEFINE_VECTORIZED_FN(from_unix_to_datetime_32);
+    DEFINE_VECTORIZED_FN(from_unix_to_datetime_ms_64);
 
     // from_unix_datetime with format's auxiliary method
     static Status from_unix_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
@@ -735,7 +780,7 @@ public:
     static int compute_weekday(long daynr, bool sunday_first_day_of_week);
     static uint32_t compute_days_in_year(uint year);
     static uint week_mode(uint mode);
-    static int32_t compute_week(uint year, uint month, uint day, uint week_behaviour);
+    static int32_t compute_week(uint year, uint month, uint day, uint week_behaviour, uint* year_local);
 
     /**
      * calculate a date by year and day of year
@@ -756,6 +801,8 @@ public:
 
 private:
     DEFINE_VECTORIZED_FN_TEMPLATE(_t_from_unix_to_datetime);
+
+    DEFINE_VECTORIZED_FN_TEMPLATE(_t_from_unix_to_datetime_ms);
 
     DEFINE_VECTORIZED_FN_TEMPLATE(_t_to_unix_from_datetime);
 
@@ -809,6 +856,12 @@ public:
         std::string fmt;
         int len;
         FormatType fmt_type;
+    };
+
+    struct ParseJodaState {
+        std::unique_ptr<joda::JodaFormat> joda;
+
+        Status prepare(std::string_view formt);
     };
 
 private:

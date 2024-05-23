@@ -100,11 +100,11 @@ public:
 
     void close(RuntimeState* state) override;
 
-    DataStreamRecvr* get_stream_recvr(RuntimeState* state, const std::shared_ptr<RuntimeProfile>& profile);
+    DataStreamRecvr* get_stream_recvr(RuntimeState* state);
     merge_path::MergePathCascadeMerger* get_merge_path_merger(RuntimeState* state);
     void close_stream_recvr();
 
-    SourceOperatorFactory::AdaptiveState adaptive_state() const override { return AdaptiveState::ACTIVE; }
+    SourceOperatorFactory::AdaptiveState adaptive_initial_state() const override { return AdaptiveState::ACTIVE; }
 
 private:
     const int32_t _num_sender;

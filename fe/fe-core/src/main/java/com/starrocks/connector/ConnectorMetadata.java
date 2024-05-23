@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.connector;
 
 import com.google.common.collect.Lists;
@@ -27,7 +26,10 @@ import com.starrocks.common.DdlException;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.UserException;
+import com.starrocks.common.profile.Tracers;
 import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.credential.CloudConfiguration;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.AddPartitionClause;
 import com.starrocks.sql.ast.AlterMaterializedViewStmt;
 import com.starrocks.sql.ast.AlterTableCommentClause;
@@ -59,6 +61,14 @@ import java.util.Optional;
 
 public interface ConnectorMetadata {
     /**
+     * Use connector type as a hint of table type.
+     * Caveat: there are exceptions that hive connector may have non-hive(e.g. iceberg) tables.
+     */
+    default Table.TableType getTableType() {
+        throw new StarRocksConnectorException("This connector doesn't support getting table type");
+    }
+
+    /**
      * List all database names of connector
      *
      * @return a list of string containing all database names of connector
@@ -79,16 +89,19 @@ public interface ConnectorMetadata {
 
     /**
      * Return all partition names of the table.
+     *
      * @param databaseName the name of the database
      * @param tableName the name of the table
+     * @param snapshotId table snapshot id, default value is -1
      * @return a list of partition names
      */
-    default List<String> listPartitionNames(String databaseName, String tableName) {
+    default List<String> listPartitionNames(String databaseName, String tableName, long snapshotId) {
         return Lists.newArrayList();
     }
 
     /**
      * Return partial partition names of the table using partitionValues to filter.
+     *
      * @param databaseName the name of the database
      * @param tableName the name of the table
      * @param partitionValues the partition value to filter
@@ -102,7 +115,7 @@ public interface ConnectorMetadata {
     /**
      * Get Table descriptor for the table specific by `dbName`.`tblName`
      *
-     * @param dbName  - the string represents the database name
+     * @param dbName - the string represents the database name
      * @param tblName - the string represents the table name
      * @return a Table instance
      */
@@ -110,10 +123,14 @@ public interface ConnectorMetadata {
         return null;
     }
 
+    default boolean tableExists(String dbName, String tblName) {
+        return listTableNames(dbName).contains(tblName);
+    }
+
     /**
      * Get Table descriptor and materialized index for the materialized view index specific by `dbName`.`tblName`
      *
-     * @param dbName  - the string represents the database name
+     * @param dbName - the string represents the database name
      * @param tblName - the string represents the table name
      * @return a Table instance
      */
@@ -126,18 +143,35 @@ public interface ConnectorMetadata {
      * There are two ways of current connector table.
      * 1. Get the remote files information from hdfs or s3 according to table or partition.
      * 2. Get file scan tasks for iceberg metadata by query predicate.
+     *
      * @param table
      * @param partitionKeys selected partition columns
      * @param snapshotId selected snapshot id
      * @param predicate used to filter metadata for iceberg, etc
      * @param fieldNames all selected columns (including partition columns)
+     * @param limit scan limit nums if needed
      *
      * @return the remote file information of the query to scan.
      */
     default List<RemoteFileInfo> getRemoteFileInfos(Table table, List<PartitionKey> partitionKeys,
-                                                    long snapshotId, ScalarOperator predicate, List<String> fieldNames) {
+                                                    long snapshotId, ScalarOperator predicate,
+                                                    List<String> fieldNames, long limit) {
         return Lists.newArrayList();
     }
+
+    /**
+     * Get table meta serialized specification
+     * @param dbName
+     * @param tableName
+     * @param snapshotId
+     * @param serializedPredicate serialized predicate string of lake format expression
+     * @return table meta serialized specification
+     */
+    default SerializedMetaSpec getSerializedMetaSpec(String dbName, String tableName,
+                                                     long snapshotId, String serializedPredicate) {
+        return null;
+    }
+
 
     default List<PartitionInfo> getPartitions(Table table, List<String> partitionNames) {
         return Lists.newArrayList();
@@ -145,11 +179,13 @@ public interface ConnectorMetadata {
 
     /**
      * Get statistics for the table.
+     *
      * @param session optimizer context
      * @param table
      * @param columns selected columns
      * @param partitionKeys selected partition keys
      * @param predicate used to filter metadata for iceberg, etc
+     * @param limit scan limit if needed, default value is -1
      *
      * @return the table statistics for the table.
      */
@@ -157,8 +193,22 @@ public interface ConnectorMetadata {
                                           Table table,
                                           Map<ColumnRefOperator, Column> columns,
                                           List<PartitionKey> partitionKeys,
-                                          ScalarOperator predicate) {
+                                          ScalarOperator predicate,
+                                          long limit) {
         return Statistics.builder().build();
+    }
+
+    default boolean prepareMetadata(MetaPreparationItem item, Tracers tracers, ConnectContext connectContext) {
+        return true;
+    }
+
+    default List<PartitionKey> getPrunedPartitions(Table table, ScalarOperator predicate, long limit) {
+        throw new StarRocksConnectorException("This connector doesn't support pruning partitions");
+    }
+
+    // return true if the connector has self info schema
+    default boolean hasSelfInfoSchema() {
+        return false;
     }
 
     /**
@@ -206,11 +256,20 @@ public interface ConnectorMetadata {
         throw new StarRocksConnectorException("This connector doesn't support dropping tables");
     }
 
+    default void dropTemporaryTable(String dbName, long tableId, String tableName, boolean isSetIfExists, boolean isForce)
+            throws DdlException {
+        throw new StarRocksConnectorException("This connector doesn't support dropping temporary tables");
+    }
+
     default void finishSink(String dbName, String table, List<TSinkCommitInfo> commitInfos) {
         throw new StarRocksConnectorException("This connector doesn't support sink");
     }
 
+    default void abortSink(String dbName, String table, List<TSinkCommitInfo> commitInfos) {
+    }
+
     default void alterTable(AlterTableStmt stmt) throws UserException {
+        throw new StarRocksConnectorException("This connector doesn't support alter table");
     }
 
     default void renameTable(Database db, Table table, TableRenameClause tableRenameClause) throws DdlException {
@@ -219,14 +278,14 @@ public interface ConnectorMetadata {
     default void alterTableComment(Database db, Table table, AlterTableCommentClause clause) {
     }
 
-    default void truncateTable(TruncateTableStmt truncateTableStmt) throws DdlException {
+    default void truncateTable(TruncateTableStmt truncateTableStmt, ConnectContext context) throws DdlException {
     }
 
     default void createTableLike(CreateTableLikeStmt stmt) throws DdlException {
     }
 
     default void addPartitions(Database db, String tableName, AddPartitionClause addPartitionClause)
-            throws DdlException, AnalysisException {
+            throws DdlException {
     }
 
     default void dropPartition(Database db, Table table, DropPartitionClause clause) throws DdlException {
@@ -264,5 +323,8 @@ public interface ConnectorMetadata {
     default void alterView(AlterViewStmt stmt) throws DdlException, UserException {
     }
 
+    default CloudConfiguration getCloudConfiguration() {
+        throw new StarRocksConnectorException("This connector doesn't support getting cloud configuration");
+    }
 }
 

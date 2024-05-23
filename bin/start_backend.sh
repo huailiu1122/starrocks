@@ -31,6 +31,7 @@ OPTS=$(getopt \
     -l 'cn' \
     -l 'be' \
     -l 'logconsole' \
+    -l 'meta_tool' \
     -l numa: \
 -- "$@")
 
@@ -41,6 +42,7 @@ RUN_CN=0
 RUN_BE=0
 RUN_NUMA="-1"
 RUN_LOG_CONSOLE=0
+RUN_META_TOOL=0
 
 while true; do
     case "$1" in
@@ -49,17 +51,20 @@ while true; do
         --be) RUN_BE=1; RUN_CN=0; shift ;;
         --logconsole) RUN_LOG_CONSOLE=1 ; shift ;;
         --numa) RUN_NUMA=$2; shift 2 ;;
+        --meta_tool) RUN_META_TOOL=1 ; shift ;;
         --) shift ;  break ;;
         *) echo "Internal error" ; exit 1 ;;
     esac
 done
-
 
 # ================== conf section =======================
 export STARROCKS_HOME=`cd "$curdir/.."; pwd`
 source $STARROCKS_HOME/bin/common.sh
 
 export_shared_envvars
+
+check_and_update_max_processes
+
 if [ ${RUN_BE} -eq 1 ] ; then
     export_env_from_conf $STARROCKS_HOME/conf/be.conf
 fi
@@ -71,9 +76,16 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-export JEMALLOC_CONF="percpu_arena:percpu,oversize_threshold:0,muzzy_decay_ms:5000,dirty_decay_ms:5000,metadata_thp:auto,background_thread:true"
+# JEMALLOC enable DEBUG 
+# export JEMALLOC_CONF="junk:true,tcache:false,prof:true"
+# Set JEMALLOC_CONF environment variable if not already set
+if [[ -z "$JEMALLOC_CONF" ]]; then
+    export JEMALLOC_CONF="percpu_arena:percpu,oversize_threshold:0,muzzy_decay_ms:5000,dirty_decay_ms:5000,metadata_thp:auto,background_thread:true,prof:true,prof_active:false"
+else
+    echo "JEMALLOC_CONF from conf is '$JEMALLOC_CONF'"
+fi
 # enable coredump when BE build with ASAN
-export ASAN_OPTIONS=abort_on_error=1:disable_coredump=0:unmap_shadow_on_exit=1
+export ASAN_OPTIONS="abort_on_error=1:disable_coredump=0:unmap_shadow_on_exit=1:detect_stack_use_after_return=1"
 export LSAN_OPTIONS=suppressions=${STARROCKS_HOME}/conf/asan_suppressions.conf
 
 
@@ -134,13 +146,19 @@ export LIBHDFS_OPTS="$LIBHDFS_OPTS -Xrs"
 
 # HADOOP_CLASSPATH defined in $STARROCKS_HOME/conf/hadoop_env.sh
 # put $STARROCKS_HOME/conf ahead of $HADOOP_CLASSPATH so that custom config can replace the config in $HADOOP_CLASSPATH
-export CLASSPATH=$STARROCKS_HOME/conf:$STARROCKS_HOME/lib/jni-packages/*:$HADOOP_CLASSPATH:$CLASSPATH
+export CLASSPATH=${STARROCKS_HOME}/lib/jni-packages/starrocks-hadoop-ext.jar:$STARROCKS_HOME/conf:$STARROCKS_HOME/lib/jni-packages/*:$HADOOP_CLASSPATH:$CLASSPATH
 
 
 # ================= native section =====================
 export LD_LIBRARY_PATH=$STARROCKS_HOME/lib/hadoop/native:$LD_LIBRARY_PATH
 export_cachelib_lib_path
 
+
+# ====== handle meta_tool sub command before any modification change
+if [ ${RUN_META_TOOL} -eq 1 ] ; then
+    ${STARROCKS_HOME}/lib/starrocks_be meta_tool "$@"
+    exit $?
+fi
 
 # ================== kill/start =======================
 if [ ! -d $LOG_DIR ]; then
@@ -173,7 +191,7 @@ fi
 
 chmod 755 ${STARROCKS_HOME}/lib/starrocks_be
 
-if [[ $(ulimit -n) -lt 60000 ]]; then
+if [ $(ulimit -n) != "unlimited" ] && [ $(ulimit -n) -lt 60000 ]; then
     ulimit -n 65535
 fi
 
@@ -184,6 +202,11 @@ if [ ${RUN_CN} -eq 1 ]; then
     LOG_FILE=${LOG_DIR}/cn.out
 fi
 
+# enable DD profile
+if [ "${ENABLE_DATADOG_PROFILE}" == "true" ] && [ -f "${STARROCKS_HOME}/datadog/ddprof" ]; then
+    START_BE_CMD="${STARROCKS_HOME}/datadog/ddprof -l debug ${START_BE_CMD}"
+fi
+
 if [ ${RUN_LOG_CONSOLE} -eq 1 ] ; then
     # force glog output to console (stderr)
     export GLOG_logtostderr=1
@@ -192,7 +215,7 @@ else
     exec &>> ${LOG_FILE}
 fi
 
-echo "start time: "$(date)
+echo "start time: $(date), server uptime: $(uptime)"
 if [ ${RUN_DAEMON} -eq 1 ]; then
     nohup ${START_BE_CMD} "$@" </dev/null &
 else

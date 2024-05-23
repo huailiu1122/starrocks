@@ -49,7 +49,9 @@ import com.starrocks.catalog.PhysicalPartitionImpl;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.util.FrontendDaemon;
-import com.starrocks.common.util.TimeUtils;
+import com.starrocks.common.util.concurrent.FairReentrantReadWriteLock;
+import com.starrocks.common.util.concurrent.lock.LockType;
+import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.consistency.CheckConsistencyJob.JobState;
 import com.starrocks.persist.ConsistencyCheckInfo;
 import com.starrocks.server.GlobalStateMgr;
@@ -57,6 +59,8 @@ import com.starrocks.task.CheckConsistencyTask;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
@@ -96,7 +100,7 @@ public class ConsistencyChecker extends FrontendDaemon {
         super("consistency checker");
 
         jobs = Maps.newHashMap();
-        jobsLock = new ReentrantReadWriteLock();
+        jobsLock = new FairReentrantReadWriteLock();
 
         if (!initWorkTime()) {
             LOG.error("failed to init time in ConsistencyChecker. exit");
@@ -105,8 +109,19 @@ public class ConsistencyChecker extends FrontendDaemon {
     }
 
     private boolean initWorkTime() {
-        Date startDate = TimeUtils.getTimeAsDate(Config.consistency_check_start_time);
-        Date endDate = TimeUtils.getTimeAsDate(Config.consistency_check_end_time);
+        // Using system time zone.
+        SimpleDateFormat hourFormat = new SimpleDateFormat("HH");
+        Date startDate;
+        Date endDate;
+        try {
+            startDate = hourFormat.parse(Config.consistency_check_start_time);
+            endDate = hourFormat.parse(Config.consistency_check_end_time);
+            LOG.info("parsed startDate: {}, endDate: {}", startDate, endDate);
+        } catch (ParseException e) {
+            LOG.error("failed to parse start/end time: {}, {}", Config.consistency_check_start_time,
+                    Config.consistency_check_end_time, e);
+            return false;
+        }
 
         if (startDate == null || endDate == null) {
             return false;
@@ -254,7 +269,7 @@ public class ConsistencyChecker extends FrontendDaemon {
         List<Long> chosenTablets = Lists.newArrayList();
 
         // sort dbs
-        List<Long> dbIds = globalStateMgr.getDbIds();
+        List<Long> dbIds = globalStateMgr.getLocalMetastore().getDbIds();
         if (dbIds.isEmpty()) {
             return chosenTablets;
         }
@@ -276,7 +291,9 @@ public class ConsistencyChecker extends FrontendDaemon {
         try {
             while ((chosenOne = dbQueue.poll()) != null) {
                 Database db = (Database) chosenOne;
-                db.readLock();
+                Locker locker = new Locker();
+                locker.lockDatabase(db, LockType.READ);
+                long startTime = System.currentTimeMillis();
                 try {
                     // sort tables
                     List<Table> tables = db.getTables();
@@ -365,7 +382,11 @@ public class ConsistencyChecker extends FrontendDaemon {
                         } // end while partitionQueue
                     } // end while tableQueue
                 } finally {
-                    db.readUnlock();
+                    // Since only at most `MAX_JOB_NUM` tablet are chosen, we don't need to release the db read lock
+                    // from time to time, just log the time cost here.
+                    LOG.info("choose tablets from db[{}-{}](with read lock held) took {}ms",
+                            db.getFullName(), db.getId(), System.currentTimeMillis() - startTime);
+                    locker.unLockDatabase(db, LockType.READ);
                 }
             } // end while dbQueue
         } finally {
@@ -390,12 +411,33 @@ public class ConsistencyChecker extends FrontendDaemon {
 
     public void replayFinishConsistencyCheck(ConsistencyCheckInfo info, GlobalStateMgr globalStateMgr) {
         Database db = globalStateMgr.getDb(info.getDbId());
-        db.writeLock();
+        if (db == null) {
+            LOG.warn("replay finish consistency check failed, db is null, info: {}", info);
+            return;
+        }
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.WRITE);
         try {
             OlapTable table = (OlapTable) db.getTable(info.getTableId());
+            if (table == null) {
+                LOG.warn("replay finish consistency check failed, table is null, info: {}", info);
+                return;
+            }
             Partition partition = table.getPartition(info.getPartitionId());
+            if (partition == null) {
+                LOG.warn("replay finish consistency check failed, partition is null, info: {}", info);
+                return;
+            }
             MaterializedIndex index = partition.getIndex(info.getIndexId());
+            if (index == null) {
+                LOG.warn("replay finish consistency check failed, index is null, info: {}", info);
+                return;
+            }
             LocalTablet tablet = (LocalTablet) index.getTablet(info.getTabletId());
+            if (tablet == null) {
+                LOG.warn("replay finish consistency check failed, tablet is null, info: {}", info);
+                return;
+            }
 
             long lastCheckTime = info.getLastCheckTime();
             db.setLastCheckTime(lastCheckTime);
@@ -407,7 +449,7 @@ public class ConsistencyChecker extends FrontendDaemon {
 
             tablet.setIsConsistent(info.isConsistent());
         } finally {
-            db.writeUnlock();
+            locker.unLockDatabase(db, LockType.WRITE);
         }
     }
 

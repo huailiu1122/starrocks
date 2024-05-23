@@ -23,6 +23,7 @@ import com.starrocks.planner.PlanFragment;
 import com.starrocks.planner.PlanFragmentId;
 import com.starrocks.planner.PlanNodeId;
 import com.starrocks.planner.ScanNode;
+import com.starrocks.planner.TableFunctionTableSink;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.scheduler.ExplainBuilder;
 import com.starrocks.sql.optimizer.Utils;
@@ -68,6 +69,7 @@ public class FragmentInstance {
     private final ExecutionFragment execFragment;
 
     private int pipelineDop = ABSENT_PIPELINE_DOP;
+    private int groupExecutionScanDop = ABSENT_PIPELINE_DOP;
 
     private final ComputeNode worker;
 
@@ -213,6 +215,18 @@ public class FragmentInstance {
         this.pipelineDop = pipelineDop;
     }
 
+    public int getGroupExecutionScanDop() {
+        if (groupExecutionScanDop == ABSENT_PIPELINE_DOP) {
+            return getPipelineDop();
+        }
+        return groupExecutionScanDop;
+    }
+
+    public void setGroupExecutionScanDop(int groupExecutionScanDop) {
+        this.groupExecutionScanDop = groupExecutionScanDop;
+    }
+
+
     public FragmentInstanceExecState getExecution() {
         return execution;
     }
@@ -273,6 +287,10 @@ public class FragmentInstance {
         return bucketSeqToDriverSeq.get(bucketSeq);
     }
 
+    public Map<Integer, Integer> getBucketSeqToDriverSeq() {
+        return bucketSeqToDriverSeq;
+    }
+
     public void addScanRanges(Integer scanId, List<TScanRangeParams> scanRanges) {
         node2ScanRanges.computeIfAbsent(scanId, k -> new ArrayList<>()).addAll(scanRanges);
     }
@@ -284,7 +302,7 @@ public class FragmentInstance {
 
     public void paddingScanRanges() {
         node2DriverSeqToScanRanges.forEach((scanId, driverSeqToScanRanges) -> {
-            for (int driverSeq = 0; driverSeq < pipelineDop; driverSeq++) {
+            for (int driverSeq = 0; driverSeq < groupExecutionScanDop; driverSeq++) {
                 driverSeqToScanRanges.computeIfAbsent(driverSeq, k -> new ArrayList<>());
             }
         });
@@ -298,15 +316,11 @@ public class FragmentInstance {
 
         DataSink dataSink = fragment.getSink();
         int dop = fragment.getPipelineDop();
-        if (!(dataSink instanceof IcebergTableSink || dataSink instanceof HiveTableSink)) {
+        if (!(dataSink instanceof IcebergTableSink || dataSink instanceof HiveTableSink
+                || dataSink instanceof TableFunctionTableSink)) {
             return dop;
         } else {
-            int sessionVarSinkDop = ConnectContext.get().getSessionVariable().getPipelineSinkDop();
-            if (sessionVarSinkDop > 0) {
-                return Math.min(dop, sessionVarSinkDop);
-            } else {
-                return Math.min(dop, IcebergTableSink.ICEBERG_SINK_MAX_DOP);
-            }
+            return ConnectContext.get().getSessionVariable().getPipelineSinkDop();
         }
     }
 

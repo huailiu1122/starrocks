@@ -62,16 +62,6 @@ public class SRMetaBlockReader {
         header = GsonUtils.GSON.fromJson(s, SRMetaBlockHeader.class);
     }
 
-    @Deprecated
-    public SRMetaBlockReader(DataInputStream dis, String name) throws IOException {
-        this.checkedInputStream = new CheckedInputStream(dis, new CRC32());
-        this.header = null;
-        this.numJsonRead = 0;
-
-        String s = Text.readStringWithChecksum(checkedInputStream);
-        header = GsonUtils.GSON.fromJson(s, SRMetaBlockHeader.class);
-    }
-
     public SRMetaBlockHeader getHeader() {
         return header;
     }
@@ -110,7 +100,7 @@ public class SRMetaBlockReader {
             LOG.warn("Meta block for {} read {} json < total {} json, will skip the rest {} json",
                     header.getSrMetaBlockID(), numJsonRead, header.getNumJson(), rest);
             for (int i = 0; i != rest; ++i) {
-                LOG.warn("skip {} json: {}", i, Text.readStringWithChecksum(checkedInputStream));
+                LOG.warn("skip {}th json: {}", i, Text.readStringWithChecksum(checkedInputStream));
             }
         }
 

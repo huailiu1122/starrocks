@@ -42,13 +42,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import static java.util.stream.Collectors.toList;
-
 /**
  * ExprRangePartitionInfo is an enhanced version of ExpressionRangePartitionInfo
  * because ExpressionRangePartitionInfo is not easily scalable
  * and get more extensions by extracting objects
  * in the future this will replace all expr range partition info
+ * As of 2023-09, it's used to describe range using expr like partition by range cast((substring(col, 3)) as int)
  */
 public class ExpressionRangePartitionInfoV2 extends RangePartitionInfo
         implements GsonPreProcessable, GsonPostProcessable {
@@ -110,9 +109,13 @@ public class ExpressionRangePartitionInfoV2 extends RangePartitionInfo
                 continue;
             }
 
-            PartitionExprAnalyzer.analyzePartitionExpr(expr, slotRef);
-            // The current expression partition only supports 1 column
-            slotRef.setType(sourcePartitionTypes.get(0));
+            try {
+                // The current expression partition only supports 1 column
+                slotRef.setType(sourcePartitionTypes.get(0));
+                PartitionExprAnalyzer.analyzePartitionExpr(expr, slotRef);
+            } catch (Throwable ex) {
+                LOG.warn("Failed to analyze partition expr: {}", expr.toSql(), ex);
+            }
         }
         serializedPartitionExprs = null;
     }
@@ -152,7 +155,15 @@ public class ExpressionRangePartitionInfoV2 extends RangePartitionInfo
         if (!automaticPartition) {
             sb.append("RANGE(");
         }
-        sb.append(Joiner.on(", ").join(partitionExprs.stream().map(Expr::toSql).collect(toList())));
+        List<String> partitionExprDesc = Lists.newArrayList();
+        for (Expr partitionExpr : partitionExprs) {
+            if (partitionExpr instanceof CastExpr && isTimestampFunction(partitionExpr)) {
+                partitionExprDesc.add(partitionExpr.getChild(0).toSql());
+            } else {
+                partitionExprDesc.add(partitionExpr.toSql());
+            }
+        }
+        sb.append(Joiner.on(", ").join(partitionExprDesc));
         if (!automaticPartition) {
             sb.append(")\n(");
             // sort range
@@ -198,6 +209,34 @@ public class ExpressionRangePartitionInfoV2 extends RangePartitionInfo
         return sb.toString();
     }
 
+    public static boolean isTimestampFunction(Expr partitionExpr) {
+        if (partitionExpr instanceof CastExpr) {
+            CastExpr castExpr = (CastExpr) partitionExpr;
+            if (!castExpr.getChildren().isEmpty()) {
+                Expr subExpr = castExpr.getChild(0);
+                if (subExpr instanceof FunctionCallExpr) {
+                    FunctionCallExpr functionCallExpr = (FunctionCallExpr) subExpr;
+                    String functionName = functionCallExpr.getFnName().getFunction();
+                    return FunctionSet.FROM_UNIXTIME.equals(functionName)
+                            || FunctionSet.FROM_UNIXTIME_MS.equals(functionName);
+                }
+            }
+        }
+        return false;
+    }
+
+    public static boolean supportedDynamicPartition(Expr expr) {
+        if (isTimestampFunction(expr)) {
+            return true;
+        }
+        if (expr instanceof FunctionCallExpr) {
+            FunctionCallExpr functionCallExpr = (FunctionCallExpr) expr;
+            String functionName = functionCallExpr.getFnName().getFunction();
+            return FunctionSet.STR2DATE.equals(functionName);
+        }
+        return false;
+    }
+
     public List<Expr> getPartitionExprs() {
         return partitionExprs;
     }
@@ -229,15 +268,5 @@ public class ExpressionRangePartitionInfoV2 extends RangePartitionInfo
 
     public void setSourcePartitionTypes(List<Type> sourcePartitionTypes) {
         this.sourcePartitionTypes = sourcePartitionTypes;
-    }
-
-    @Override
-    protected Object clone() {
-        ExpressionRangePartitionInfoV2 v2 = (ExpressionRangePartitionInfoV2) super.clone();
-        v2.partitionExprs = Lists.newArrayList(this.partitionExprs);
-        v2.serializedPartitionExprs = Lists.newArrayList(this.serializedPartitionExprs);
-        v2.automaticPartition = this.automaticPartition;
-        v2.sourcePartitionTypes = Lists.newArrayList(sourcePartitionTypes);
-        return v2;
     }
 }

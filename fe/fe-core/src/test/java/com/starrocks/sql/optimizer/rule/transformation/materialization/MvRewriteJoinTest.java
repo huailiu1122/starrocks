@@ -117,8 +117,7 @@ public class MvRewriteJoinTest extends MvRewriteTestBase {
 
     @Test
     public void testMVRewriteJoin1() throws Exception {
-        createAndRefreshMv("test", "test_partition_tbl_mv2",
-                "CREATE MATERIALIZED VIEW test_partition_tbl_mv2\n" +
+        createAndRefreshMv("CREATE MATERIALIZED VIEW test_partition_tbl_mv2\n" +
                         "PARTITION BY k1\n" +
                         "DISTRIBUTED BY HASH(k1) BUCKETS 10\n" +
                         "REFRESH ASYNC\n" +
@@ -129,7 +128,7 @@ public class MvRewriteJoinTest extends MvRewriteTestBase {
             String query = "select a.v2 FROM test_partition_tbl1 as a left join test_partition_tbl2 as b " +
                     "on a.k1=b.k1 where a.k1 = '2020-01-01' and a.v1 = 1 and b.k1 = '2020-01-01' and b.v1 = 2;";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "PREDICATES: 8: v1 = 1, 7: k1 = '2020-01-01', 10: b_v1 = 2\n" +
+            PlanTestBase.assertContains(plan, "PREDICATES: 7: k1 = '2020-01-01', 8: v1 = 1, 10: b_v1 = 2\n" +
                     "     partitions=1/6\n" +
                     "     rollup: test_partition_tbl_mv2");
         }
@@ -150,7 +149,7 @@ public class MvRewriteJoinTest extends MvRewriteTestBase {
                     " where a.k1='2020-01-01' and b.k1 = '2020-01-01' " +
                     " and a.v1=1 and b.v1=1;";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "PREDICATES: 8: v1 = 1, 7: k1 = '2020-01-01', 10: b_v1 = 1\n" +
+            PlanTestBase.assertContains(plan, "PREDICATES: 7: k1 = '2020-01-01', 8: v1 = 1, 10: b_v1 = 1\n" +
                     "     partitions=1/6\n" +
                     "     rollup: test_partition_tbl_mv2");
         }
@@ -168,8 +167,7 @@ public class MvRewriteJoinTest extends MvRewriteTestBase {
 
     @Test
     public void testMVRewriteJoin2() throws Exception {
-        createAndRefreshMv("test", "test_partition_tbl_mv2",
-                "CREATE MATERIALIZED VIEW test_partition_tbl_mv2\n" +
+        createAndRefreshMv("CREATE MATERIALIZED VIEW test_partition_tbl_mv2\n" +
                         "PARTITION BY k1\n" +
                         "DISTRIBUTED BY HASH(k1) BUCKETS 10\n" +
                         "REFRESH ASYNC\n" +
@@ -182,7 +180,7 @@ public class MvRewriteJoinTest extends MvRewriteTestBase {
                     "on a.k1=b.k1 where a.k1 = '2020-01-01' and a.v1 = 1 and b.k1 = '2020-01-01' and b.v1 = 2 " +
                     "group by a.k1, a.v1, a.v2, b.v1;";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "PREDICATES: 9: v1 = 1, 8: k1 = '2020-01-01', 11: b_v1 = 2\n" +
+            PlanTestBase.assertContains(plan, "PREDICATES: 8: k1 = '2020-01-01', 9: v1 = 1, 11: b_v1 = 2\n" +
                     "     partitions=1/6\n" +
                     "     rollup: test_partition_tbl_mv2");
         }
@@ -204,7 +202,7 @@ public class MvRewriteJoinTest extends MvRewriteTestBase {
                     " where a.k1='2020-01-01' and b.k1 = '2020-01-01' " +
                     " and a.v1=1 and b.v1=1 group by a.k1, a.v1, a.v2, b.v1;";
             String plan = getFragmentPlan(query);
-            PlanTestBase.assertContains(plan, "PREDICATES: 9: v1 = 1, 8: k1 = '2020-01-01', 11: b_v1 = 1\n" +
+            PlanTestBase.assertContains(plan, "PREDICATES: 8: k1 = '2020-01-01', 9: v1 = 1, 11: b_v1 = 1\n" +
                     "     partitions=1/6\n" +
                     "     rollup: test_partition_tbl_mv2");
         }
@@ -219,5 +217,34 @@ public class MvRewriteJoinTest extends MvRewriteTestBase {
             PlanTestBase.assertNotContains(plan, "test_partition_tbl_mv2");
         }
         starRocksAssert.dropMaterializedView("test_partition_tbl_mv2");
+    }
+
+
+    @Test
+    public void testMvColocateJoinRewrite() throws Exception {
+        createAndRefreshMv("CREATE MATERIALIZED VIEW test_partition_tbl1_colocate_mv1\n" +
+                        "PARTITION BY k1\n" +
+                        "DISTRIBUTED BY HASH(k1) BUCKETS 10\n" +
+                        "REFRESH ASYNC PROPERTIES ('colocate_with' = 'cg_1')\n" +
+                        "AS SELECT v2 + 1, k1, v1, v2 FROM test_partition_tbl1;");
+
+        createAndRefreshMv("CREATE MATERIALIZED VIEW test_partition_tbl1_colocate_mv2\n" +
+                        "PARTITION BY k1\n" +
+                        "DISTRIBUTED BY HASH(k1) BUCKETS 10\n" +
+                        "REFRESH ASYNC PROPERTIES ('colocate_with' = 'cg_1')\n" +
+                        "AS SELECT v2 + 1, k1, v1, v2 + 2 FROM test_partition_tbl1 where v1 > 1 ;");
+
+        String query = "select t1.v2 + 1, t2.v2 + 1 from test_partition_tbl1 t1 join " +
+                "test_partition_tbl1 t2 on t1.k1 = t2.k1 and t2.v1 > 1";
+        String plan = getFragmentPlan(query);
+        PlanTestBase.assertContains(plan, "4:HASH JOIN\n" +
+                "  |  join op: INNER JOIN (COLOCATE)\n" +
+                "  |  colocate: true\n" +
+                "  |  equal join conjunct: 1: k1 = 4: k1");
+
+        starRocksAssert.dropMaterializedView("test_partition_tbl1_colocate_mv1");
+        starRocksAssert.dropMaterializedView("test_partition_tbl1_colocate_mv2");
+
+
     }
 }

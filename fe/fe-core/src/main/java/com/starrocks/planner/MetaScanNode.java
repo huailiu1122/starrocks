@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.planner;
 
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.TupleDescriptor;
+import com.starrocks.catalog.Column;
 import com.starrocks.catalog.LocalTablet;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.OlapTable;
@@ -25,8 +25,10 @@ import com.starrocks.catalog.Replica;
 import com.starrocks.catalog.Tablet;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
 import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.system.ComputeNode;
+import com.starrocks.thrift.TColumn;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TInternalScanRange;
 import com.starrocks.thrift.TMetaScanNode;
@@ -50,13 +52,16 @@ public class MetaScanNode extends ScanNode {
     private static final Logger LOG = LogManager.getLogger(MetaScanNode.class);
     private final Map<Integer, String> columnIdToNames;
     private final OlapTable olapTable;
+    private List<Column> tableSchema = Lists.newArrayList();
     private final List<TScanRangeLocations> result = Lists.newArrayList();
 
     public MetaScanNode(PlanNodeId id, TupleDescriptor desc, OlapTable olapTable,
-                        Map<Integer, String> columnIdToNames) {
+                        Map<Integer, String> columnIdToNames, long warehouseId) {
         super(id, desc, "MetaScan");
         this.olapTable = olapTable;
+        this.tableSchema = olapTable.getBaseSchema();
         this.columnIdToNames = columnIdToNames;
+        this.warehouseId = warehouseId;
     }
 
     public void computeRangeLocations() {
@@ -82,8 +87,14 @@ public class MetaScanNode extends ScanNode {
 
                 // random shuffle List && only collect one copy
                 List<Replica> allQueryableReplicas = Lists.newArrayList();
-                tablet.getQueryableReplicas(allQueryableReplicas, Collections.emptyList(),
-                        visibleVersion, -1, schemaHash);
+                if (RunMode.isSharedDataMode()) {
+                    tablet.getQueryableReplicas(allQueryableReplicas, Collections.emptyList(),
+                            visibleVersion, -1, schemaHash, warehouseId);
+                } else {
+                    tablet.getQueryableReplicas(allQueryableReplicas, Collections.emptyList(),
+                            visibleVersion, -1, schemaHash);
+                }
+
                 if (allQueryableReplicas.isEmpty()) {
                     LOG.error("no queryable replica found in tablet {}. visible version {}",
                             tabletId, visibleVersion);
@@ -105,7 +116,8 @@ public class MetaScanNode extends ScanNode {
                 Collections.shuffle(allQueryableReplicas);
                 boolean tabletIsNull = true;
                 for (Replica replica : allQueryableReplicas) {
-                    ComputeNode node = GlobalStateMgr.getCurrentSystemInfo().getBackendOrComputeNode(replica.getBackendId());
+                    ComputeNode node =
+                            GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackendOrComputeNode(replica.getBackendId());
                     if (node == null) {
                         LOG.debug("replica {} not exists", replica.getBackendId());
                         continue;
@@ -144,6 +156,12 @@ public class MetaScanNode extends ScanNode {
         }
         msg.meta_scan_node = new TMetaScanNode();
         msg.meta_scan_node.setId_to_names(columnIdToNames);
+        List<TColumn> columnsDesc = Lists.newArrayList();
+        for (Column column : tableSchema) {
+            TColumn tColumn = column.toThrift();
+            columnsDesc.add(tColumn);
+        }
+        msg.meta_scan_node.setColumns(columnsDesc);
     }
 
     @Override

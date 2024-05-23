@@ -16,7 +16,7 @@ package com.starrocks.credential.aliyun;
 
 import com.google.common.base.Preconditions;
 import com.staros.proto.FileStoreInfo;
-import com.starrocks.credential.CloudConfigurationConstants;
+import com.starrocks.connector.share.credential.CloudConfigurationConstants;
 import com.starrocks.credential.CloudCredential;
 import org.apache.hadoop.conf.Configuration;
 
@@ -36,6 +36,19 @@ public class AliyunCloudCredential implements CloudCredential {
         this.secretKey = secretKey;
         this.endpoint = endpoint;
     }
+
+    public String getAccessKey() {
+        return accessKey;
+    }
+
+    public String getSecretKey() {
+        return secretKey;
+    }
+
+    public String getEndpoint() {
+        return endpoint;
+    }
+
     @Override
     public void applyToConfiguration(Configuration configuration) {
         configuration.set("fs.oss.impl", "com.aliyun.jindodata.oss.JindoOssFileSystem");
@@ -56,12 +69,15 @@ public class AliyunCloudCredential implements CloudCredential {
         properties.put(CloudConfigurationConstants.AWS_S3_ACCESS_KEY, accessKey);
         properties.put(CloudConfigurationConstants.AWS_S3_SECRET_KEY, secretKey);
         properties.put(CloudConfigurationConstants.AWS_S3_ENDPOINT, endpoint);
+        properties.put(CloudConfigurationConstants.ALIYUN_OSS_ACCESS_KEY, accessKey);
+        properties.put(CloudConfigurationConstants.ALIYUN_OSS_SECRET_KEY, secretKey);
+        properties.put(CloudConfigurationConstants.ALIYUN_OSS_ENDPOINT, endpoint);
     }
 
     @Override
-    public String getCredentialString() {
+    public String toCredString() {
         return "AliyunCloudCredential{" +
-                "accessKey=" + accessKey +
+                "accessKey='" + accessKey + '\'' +
                 ", secretKey='" + secretKey + '\'' +
                 ", endpoint='" + endpoint + '\'' +
                 '}';

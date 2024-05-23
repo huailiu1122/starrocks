@@ -15,7 +15,6 @@
 package com.starrocks.alter;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 import com.starrocks.analysis.ParseNode;
 import com.starrocks.analysis.TableName;
 import com.starrocks.catalog.Database;
@@ -23,13 +22,15 @@ import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.MaterializedViewExceptions;
+import com.starrocks.common.util.concurrent.lock.LockType;
+import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.persist.AlterViewInfo;
 import com.starrocks.persist.SwapTableOperationLog;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.scheduler.mv.MaterializedViewMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.LocalMetastore;
-import com.starrocks.server.MetadataMgr;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.AddColumnClause;
 import com.starrocks.sql.ast.AddColumnsClause;
@@ -52,6 +53,7 @@ import com.starrocks.sql.ast.DropRollupClause;
 import com.starrocks.sql.ast.ModifyColumnClause;
 import com.starrocks.sql.ast.ModifyPartitionClause;
 import com.starrocks.sql.ast.ModifyTablePropertiesClause;
+import com.starrocks.sql.ast.OptimizeClause;
 import com.starrocks.sql.ast.PartitionRenameClause;
 import com.starrocks.sql.ast.ReorderColumnsClause;
 import com.starrocks.sql.ast.ReplacePartitionClause;
@@ -66,7 +68,7 @@ import org.apache.logging.log4j.Logger;
 
 import static com.starrocks.sql.common.UnsupportedException.unsupportedException;
 
-public class AlterJobExecutor extends AstVisitor<Void, ConnectContext> {
+public class AlterJobExecutor implements AstVisitor<Void, ConnectContext> {
     protected static final Logger LOG = LogManager.getLogger(AlterJobExecutor.class);
     protected Database db;
     protected Table table;
@@ -115,7 +117,8 @@ public class AlterJobExecutor extends AstVisitor<Void, ConnectContext> {
     @Override
     public Void visitSwapTableClause(SwapTableClause clause, ConnectContext context) {
         // must hold db write lock
-        Preconditions.checkState(db.isWriteLockHeldByCurrentThread());
+        Locker locker = new Locker();
+        Preconditions.checkState(locker.isDbWriteLockHeldByCurrentThread(db));
 
         OlapTable origTable = (OlapTable) table;
 
@@ -140,14 +143,9 @@ public class AlterJobExecutor extends AstVisitor<Void, ConnectContext> {
 
             // inactive the related MVs
             LocalMetastore.inactiveRelatedMaterializedView(db, origTable,
-                    String.format("based table %s swapped", origTblName));
+                    MaterializedViewExceptions.inactiveReasonForBaseTableSwapped(origTblName));
             LocalMetastore.inactiveRelatedMaterializedView(db, olapNewTbl,
-                    String.format("based table %s swapped", newTblName));
-
-            MetadataMgr.inactiveViews(
-                    Lists.newArrayList(new TableName(db.getOriginName(), newTblName),
-                            new TableName(db.getOriginName(), origTblName)),
-                    "table [" + origTblName + "] swapped with table [" + newTblName + "]");
+                    MaterializedViewExceptions.inactiveReasonForBaseTableSwapped(newTblName));
 
             SwapTableOperationLog log = new SwapTableOperationLog(db.getId(), origTable.getId(), olapNewTbl.getId());
             GlobalStateMgr.getCurrentState().getAlterJobMgr().swapTableInternal(log);
@@ -163,6 +161,12 @@ public class AlterJobExecutor extends AstVisitor<Void, ConnectContext> {
 
     @Override
     public Void visitModifyTablePropertiesClause(ModifyTablePropertiesClause clause, ConnectContext context) {
+        unsupportedException("Not support");
+        return null;
+    }
+
+    @Override
+    public Void visitOptimizeClause(OptimizeClause clause, ConnectContext context) {
         unsupportedException("Not support");
         return null;
     }
@@ -271,7 +275,7 @@ public class AlterJobExecutor extends AstVisitor<Void, ConnectContext> {
         AlterViewInfo alterViewInfo = new AlterViewInfo(db.getId(), table.getId(),
                 alterViewClause.getInlineViewDef(),
                 alterViewClause.getColumns(),
-                ctx.getSessionVariable().getSqlMode());
+                ctx.getSessionVariable().getSqlMode(), alterViewClause.getComment());
 
         GlobalStateMgr.getCurrentState().getAlterJobMgr().alterView(alterViewInfo);
         GlobalStateMgr.getCurrentState().getEditLog().logModifyViewDef(alterViewInfo);
@@ -319,7 +323,8 @@ public class AlterJobExecutor extends AstVisitor<Void, ConnectContext> {
         final TableName mvName = stmt.getMvName();
         Database db = MetaUtils.getDatabase(context, mvName);
 
-        if (!db.writeLockAndCheckExist()) {
+        Locker locker = new Locker();
+        if (!locker.lockDatabaseAndCheckExist(db, LockType.WRITE)) {
             throw new AlterJobException("alter materialized failed. database:" + db.getFullName() + " not exist");
         }
 
@@ -343,7 +348,7 @@ public class AlterJobExecutor extends AstVisitor<Void, ConnectContext> {
             MaterializedViewMgr.getInstance().rebuildMaintainMV(materializedView);
             return null;
         } finally {
-            db.writeUnlock();
+            locker.unLockDatabase(db, LockType.WRITE);
         }
     }
 }

@@ -32,8 +32,10 @@ import com.starrocks.connector.MetastoreType;
 import com.starrocks.connector.PartitionUtil;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.sql.ast.ColumnDef;
+import com.starrocks.sql.ast.CreateTableLikeStmt;
 import com.starrocks.sql.ast.CreateTableStmt;
 import com.starrocks.sql.ast.ListPartitionDesc;
+import com.starrocks.sql.parser.NodePosition;
 import mockit.Mock;
 import mockit.MockUp;
 import org.apache.hadoop.conf.Configuration;
@@ -66,7 +68,7 @@ public class HiveMetastoreOperationsTest {
     @Before
     public void setUp() throws Exception {
         client = new HiveMetastoreTest.MockedHiveMetaClient();
-        metastore = new HiveMetastore(client, "hive_catalog");
+        metastore = new HiveMetastore(client, "hive_catalog", null);
         executor = Executors.newFixedThreadPool(5);
         cachingHiveMetastore = new CachingHiveMetastore(
                 metastore, executor, expireAfterWriteSec, refreshAfterWriteSec, 1000, false);
@@ -117,6 +119,11 @@ public class HiveMetastoreOperationsTest {
         Assert.assertEquals(ScalarType.INT, hiveTable.getPartitionColumns().get(0).getType());
         Assert.assertEquals(ScalarType.INT, hiveTable.getBaseSchema().get(0).getType());
         Assert.assertEquals("hive_catalog", hiveTable.getCatalogName());
+    }
+
+    @Test
+    public void testTableExists() {
+        Assert.assertTrue(hmsOps.tableExists("db1", "tbl1"));
     }
 
     @Test
@@ -210,7 +217,7 @@ public class HiveMetastoreOperationsTest {
         }
 
         HiveMetaClient client = new MockedTestMetaClient();
-        HiveMetastore metastore = new HiveMetastore(client, "hive_catalog");
+        HiveMetastore metastore = new HiveMetastore(client, "hive_catalog", null);
         ExecutorService executor = Executors.newFixedThreadPool(5);
         CachingHiveMetastore cachingHiveMetastore = new CachingHiveMetastore(
                 metastore, executor, expireAfterWriteSec, refreshAfterWriteSec, 1000, false);
@@ -239,7 +246,7 @@ public class HiveMetastoreOperationsTest {
             }
         }
 
-        metastore = new HiveMetastore(new MockedTestMetaClient1(), "hive_catalog");
+        metastore = new HiveMetastore(new MockedTestMetaClient1(), "hive_catalog", MetastoreType.HMS);
         executor = Executors.newFixedThreadPool(5);
         cachingHiveMetastore = new CachingHiveMetastore(
                 metastore, executor, expireAfterWriteSec, refreshAfterWriteSec, 1000, false);
@@ -258,7 +265,7 @@ public class HiveMetastoreOperationsTest {
             }
         }
         HiveMetaClient client = new MockedTestMetaClient1();
-        HiveMetastore metastore = new HiveMetastore(client, "hive_catalog");
+        HiveMetastore metastore = new HiveMetastore(client, "hive_catalog", MetastoreType.HMS);
         ExecutorService executor = Executors.newFixedThreadPool(5);
         CachingHiveMetastore cachingHiveMetastore = new CachingHiveMetastore(
                 metastore, executor, expireAfterWriteSec, refreshAfterWriteSec, 1000, false);
@@ -266,7 +273,7 @@ public class HiveMetastoreOperationsTest {
                 new Configuration(), MetastoreType.HMS, "hive_catalog");
 
         ExceptionChecker.expectThrowsWithMsg(StarRocksConnectorException.class,
-                "Database 'db' location is not set",
+                "Failed to find location in database 'db'",
                 () -> hmsOps.getDefaultLocation("db", "table"));
 
         new MockUp<HiveWriteUtils>() {
@@ -284,7 +291,7 @@ public class HiveMetastoreOperationsTest {
             }
         }
         HiveMetaClient client2 = new MockedTestMetaClient2();
-        HiveMetastore metastore2 = new HiveMetastore(client2, "hive_catalog");
+        HiveMetastore metastore2 = new HiveMetastore(client2, "hive_catalog", MetastoreType.HMS);
         CachingHiveMetastore cachingHiveMetastore2 = new CachingHiveMetastore(
                 metastore2, executor, expireAfterWriteSec, refreshAfterWriteSec, 1000, false);
         HiveMetastoreOperations hmsOps2 = new HiveMetastoreOperations(cachingHiveMetastore2, true,
@@ -357,8 +364,54 @@ public class HiveMetastoreOperationsTest {
                 new HashMap<>(),
                 "my table comment");
         List<Column> columns = stmt.getColumnDefs().stream().map(ColumnDef::toColumn).collect(Collectors.toList());
-        stmt.getColumns().addAll(columns);
+        stmt.setColumns(columns);
 
         Assert.assertTrue(mockedHmsOps.createTable(stmt));
+    }
+
+    @Test
+    public void testCreateTableLike() throws DdlException {
+        new MockUp<HiveWriteUtils>() {
+            public void createDirectory(Path path, Configuration conf) {
+            }
+        };
+
+        HiveMetastoreOperations mockedHmsOps = new HiveMetastoreOperations(cachingHiveMetastore, true,
+                new Configuration(), MetastoreType.HMS, "hive_catalog") {
+            @Override
+            public Path getDefaultLocation(String dbName, String tableName) {
+                return new Path("mytable_locatino");
+            }
+        };
+
+        // stmt is constructed according to getTable method in HiveMetastoreTest as when creating a table using Create
+        // Table Like DDL, the system looks for the like table from hms.
+        CreateTableStmt stmt = new CreateTableStmt(
+                false,
+                true,
+                new TableName("hive_catalog", "hive_db", "hive_table"),
+                Lists.newArrayList(
+                        new ColumnDef("col1", TypeDef.create(PrimitiveType.INT)),
+                        new ColumnDef("col2", TypeDef.create(PrimitiveType.INT))),
+                "hive",
+                null,
+                new ListPartitionDesc(Lists.newArrayList("col1"), new ArrayList<>()),
+                null,
+                new HashMap<>(),
+                new HashMap<>(),
+                "my table comment");
+        List<Column> columns = stmt.getColumnDefs().stream().map(ColumnDef::toColumn).collect(Collectors.toList());
+        stmt.setColumns(columns);
+
+        CreateTableLikeStmt createTableLikeStmt = new CreateTableLikeStmt(
+                false,
+                new TableName("hive_catalog", "hive_db", "hive_table_1"),
+                new TableName("hive_catalog", "hive_db", "hive_table"),
+                null,
+                null,
+                new HashMap<>(),
+                NodePosition.ZERO);
+        createTableLikeStmt.setCreateTableStmt(stmt);
+        Assert.assertTrue(mockedHmsOps.createTableLike(createTableLikeStmt));
     }
 }

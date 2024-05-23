@@ -89,8 +89,10 @@ public:
 
     // partition -> begin offset, inclusive.
     std::map<int32_t, int64_t> begin_offset;
-    // partiton -> commit offset, inclusive.
+    // partition -> commit offset, inclusive.
     std::map<int32_t, int64_t> cmt_offset;
+    // partition -> commit offset timestamp, inclusive.
+    std::map<int32_t, int64_t> cmt_offset_timestamp;
     //custom kafka property key -> value
     std::map<std::string, std::string> properties;
 };
@@ -151,7 +153,7 @@ public:
 
     ~StreamLoadContext() noexcept {
         if (need_rollback) {
-            _exec_env->stream_load_executor()->rollback_txn(this);
+            (void)_exec_env->stream_load_executor()->rollback_txn(this);
             need_rollback = false;
         }
 

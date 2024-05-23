@@ -25,6 +25,7 @@ import com.google.common.hash.Hashing;
 import com.google.common.hash.PrimitiveSink;
 import com.starrocks.catalog.PartitionKey;
 import com.starrocks.common.UserException;
+import com.starrocks.common.profile.Tracers;
 import com.starrocks.common.util.ConsistentHashRing;
 import com.starrocks.common.util.HashRing;
 import com.starrocks.common.util.RendezvousHashRing;
@@ -32,12 +33,13 @@ import com.starrocks.planner.DeltaLakeScanNode;
 import com.starrocks.planner.FileTableScanNode;
 import com.starrocks.planner.HdfsScanNode;
 import com.starrocks.planner.HudiScanNode;
+import com.starrocks.planner.IcebergMetadataScanNode;
 import com.starrocks.planner.IcebergScanNode;
+import com.starrocks.planner.OdpsScanNode;
 import com.starrocks.planner.PaimonScanNode;
 import com.starrocks.planner.ScanNode;
 import com.starrocks.qe.scheduler.NonRecoverableException;
 import com.starrocks.qe.scheduler.WorkerProvider;
-import com.starrocks.sql.PlannerProfile;
 import com.starrocks.sql.plan.HDFSScanNodePredicates;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.THdfsScanRange;
@@ -85,7 +87,7 @@ public class HDFSBackendSelector implements BackendSelector {
     // After testing, this value can ensure that the scan range size assigned to each BE is as uniform as possible,
     // and the largest scan data is not more than 1.1 times of the average value
     private final double kMaxImbalanceRatio = 1.1;
-    public static final int CONSISTENT_HASH_RING_VIRTUAL_NUMBER = 32;
+    public static final int CONSISTENT_HASH_RING_VIRTUAL_NUMBER = 256;
 
     class HdfsScanRangeHasher {
         String basePath;
@@ -115,6 +117,11 @@ public class HDFSBackendSelector implements BackendSelector {
                 PaimonScanNode node = (PaimonScanNode) scanNode;
                 predicates = node.getScanNodePredicates();
                 basePath = node.getPaimonTable().getTableLocation();
+            } else if (scanNode instanceof OdpsScanNode) {
+                OdpsScanNode node = (OdpsScanNode) scanNode;
+                predicates = node.getScanNodePredicates();
+            } else if (scanNode instanceof IcebergMetadataScanNode) {
+                // ignored
             } else {
                 Preconditions.checkState(false);
             }
@@ -248,7 +255,8 @@ public class HDFSBackendSelector implements BackendSelector {
                     }
                     backends.addAll(servers);
                 }
-                ComputeNode node = reBalanceScanRangeForComputeNode(backends, avgNodeScanRangeBytes, scanRangeLocations);
+                ComputeNode node =
+                        reBalanceScanRangeForComputeNode(backends, avgNodeScanRangeBytes, scanRangeLocations);
                 if (node == null) {
                     remoteScanRangeLocations.add(scanRangeLocations);
                 } else {
@@ -307,12 +315,12 @@ public class HDFSBackendSelector implements BackendSelector {
         for (Map.Entry<ComputeNode, Long> entry : assignedScansPerComputeNode.entrySet()) {
             sb.append(entry.getKey().getAddress().hostname).append(":").append(entry.getValue()).append(",");
         }
-        PlannerProfile.addCustomProperties(scanNode.getTableName() + " scan_range_bytes", sb.toString());
+        Tracers.record(Tracers.Module.EXTERNAL, scanNode.getTableName() + " scan_range_bytes", sb.toString());
         // record re-balance bytes for each backend
         sb = new StringBuilder();
         for (Map.Entry<ComputeNode, Long> entry : reBalanceBytesPerComputeNode.entrySet()) {
             sb.append(entry.getKey().getAddress().hostname).append(":").append(entry.getValue()).append(",");
         }
-        PlannerProfile.addCustomProperties(scanNode.getTableName() + " rebalance_bytes", sb.toString());
+        Tracers.record(Tracers.Module.EXTERNAL, scanNode.getTableName() + " rebalance_bytes", sb.toString());
     }
 }

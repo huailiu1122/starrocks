@@ -48,7 +48,7 @@ public class ShowAlterStmtAnalyzer {
         new ShowAlterStmtAnalyzerVisitor().visit(statement, context);
     }
 
-    static class ShowAlterStmtAnalyzerVisitor extends AstVisitor<Void, ConnectContext> {
+    static class ShowAlterStmtAnalyzerVisitor implements AstVisitor<Void, ConnectContext> {
 
         private final HashMap<String, Expr> filterMap = new HashMap<>();
 
@@ -77,6 +77,8 @@ public class ShowAlterStmtAnalyzer {
                 sb.append("/schema_change");
             } else if (type == ShowAlterStmt.AlterType.ROLLUP || type == ShowAlterStmt.AlterType.MATERIALIZED_VIEW) {
                 sb.append("/rollup");
+            } else if (type == ShowAlterStmt.AlterType.OPTIMIZE) {
+                sb.append("/optimize");
             }
 
             // create show proc stmt

@@ -320,7 +320,7 @@ TEST(SortingTest, merge_sorted_chunks) {
 
     SortDescs sort_desc(std::vector<int>{1}, std::vector<int>{-1});
     SortedRuns output;
-    merge_sorted_chunks(sort_desc, &sort_exprs, input_chunks, &output);
+    ASSERT_OK(merge_sorted_chunks(sort_desc, &sort_exprs, input_chunks, &output));
     ASSERT_TRUE(output.is_sorted(sort_desc));
 }
 
@@ -373,10 +373,10 @@ TEST(SortingTest, merge_sorted_stream) {
     }
 
     std::vector<ChunkUniquePtr> output_chunks;
-    merge_sorted_cursor_cascade(sort_desc, std::move(input_cursors), [&](ChunkUniquePtr chunk) {
+    ASSERT_OK(merge_sorted_cursor_cascade(sort_desc, std::move(input_cursors), [&](ChunkUniquePtr chunk) {
         output_chunks.push_back(std::move(chunk));
         return Status::OK();
-    });
+    }));
 
     for (auto& chunk : output_chunks) {
         for (int i = 0; i < chunk->num_rows(); i++) {
@@ -553,13 +553,11 @@ static void test_merge_path(const size_t num_cols, const size_t left_start, cons
 
 TEST(MergePathTest, test1) {
     for (size_t num_col = 1; num_col <= 2; num_col++) {
-        for (size_t left_num_rows = 0; left_num_rows <= 4096;
-             left_num_rows == 0 ? left_num_rows++ : left_num_rows *= 2) {
-            for (size_t right_num_rows = 0; right_num_rows <= 4096;
-                 right_num_rows == 0 ? right_num_rows++ : right_num_rows *= 2) {
+        for (size_t left_num_rows = 0; left_num_rows <= 4096; left_num_rows += 2048) {
+            for (size_t right_num_rows = 0; right_num_rows <= 4096; right_num_rows += 2048) {
                 for (size_t left_start : std::array<size_t, 2>{0, left_num_rows / 2}) {
                     for (size_t right_start : std::array<size_t, 2>{0, right_num_rows / 2}) {
-                        for (int processor_num = 1; processor_num < 8; processor_num++) {
+                        for (int processor_num = 1; processor_num <= 8; processor_num *= 2) {
                             const size_t left_len = left_num_rows - left_start;
                             const size_t right_len = right_num_rows - right_start;
                             const size_t dest_size = left_len + right_len;

@@ -302,6 +302,7 @@ fi
 if [ ! -f $PATCHED_MARK ] && [ $BRPC_SOURCE == "brpc-1.3.0" ]; then
     patch -p1 < $TP_PATCH_DIR/brpc-1.3.0.patch
     patch -p1 < $TP_PATCH_DIR/brpc-1.3.0-CVE-2023-31039.patch
+    patch -p1 < $TP_PATCH_DIR/brpc-1.3.0-2479.patch
     touch $PATCHED_MARK
 fi
 cd -
@@ -374,7 +375,7 @@ echo "Finished patching $CROARINGBITMAP_SOURCE"
 
 # patch pulsar
 cd $TP_SOURCE_DIR/$PULSAR_SOURCE
-if [ ! -f $PATCHED_MARK ] && [ $PULSAR_SOURCE = "pulsar-2.10.1" ]; then
+if [ ! -f $PATCHED_MARK ] && [ $PULSAR_SOURCE = "pulsar-client-cpp-3.3.0" ]; then
     patch -p1 < $TP_PATCH_DIR/pulsar.patch
     touch $PATCHED_MARK
 fi
@@ -392,40 +393,19 @@ else
 fi
 
 cd $TP_SOURCE_DIR/$AWS_SDK_CPP_SOURCE
-if [ ! -f $PATCHED_MARK ] && [ $AWS_SDK_CPP_SOURCE = "aws-sdk-cpp-1.9.179" ]; then
+if [ $AWS_SDK_CPP_SOURCE = "aws-sdk-cpp-1.11.267" ]; then
     if [ ! -f prefetch_crt_dep_ok ]; then
         bash ./prefetch_crt_dependency.sh
         touch prefetch_crt_dep_ok
     fi
-    patch -p0 < $TP_PATCH_DIR/aws-sdk-cpp-1.9.179.patch    
-    # Fix crt BB, refer to https://github.com/aws/s2n-tls/issues/3166
-    patch -p1 -f -i $TP_PATCH_DIR/aws-sdk-cpp-patch-1.9.179-s2n-compile-error.patch
-    # refer to https://github.com/aws/aws-sdk-cpp/issues/1824
-    patch -p1 < $TP_PATCH_DIR/aws-sdk-cpp-patch-1.9.179-LINK_LIBRARIES_ALL.patch
-    touch $PATCHED_MARK
-    echo "Finished patching $AWS_SDK_CPP_SOURCE"
-else
-    echo "$AWS_SDK_CPP_SOURCE not patched"
 fi
 
-cd $TP_SOURCE_DIR/$AWS_SDK_CPP_SOURCE
-if [ ! -f $PATCHED_MARK ] && [ $AWS_SDK_CPP_SOURCE = "aws-sdk-cpp-1.10.36" ]; then
-    if [ ! -f prefetch_crt_dep_ok ]; then
-        bash ./prefetch_crt_dependency.sh
-        touch prefetch_crt_dep_ok
-    fi
-    # Fix InstanceProfile deadlock, refer to https://github.com/aws/aws-sdk-cpp/issues/2251
-    patch -p1 < $TP_PATCH_DIR/aws-sdk-cpp-1.10.36-instance-profile-deadlock.patch   
-    touch $PATCHED_MARK
-    echo "Finished patching $AWS_SDK_CPP_SOURCE"
-else
-    echo "$AWS_SDK_CPP_SOURCE not patched"
-fi
 
 # patch jemalloc_hook
 cd $TP_SOURCE_DIR/$JEMALLOC_SOURCE
 if [ ! -f $PATCHED_MARK ] && [ $JEMALLOC_SOURCE = "jemalloc-5.3.0" ]; then
     patch -p0 < $TP_PATCH_DIR/jemalloc_hook.patch
+    patch -p0 < $TP_PATCH_DIR/jemalloc_nallocx.patch
     touch $PATCHED_MARK
 fi
 cd -
@@ -477,6 +457,15 @@ fi
 echo "Finished patching $SERDES_SOURCE"
 cd -
 
+# patch sasl2
+cd $TP_SOURCE_DIR/$SASL_SOURCE
+if [ ! -f $PATCHED_MARK ] && [ $SASL_SOURCE = "cyrus-sasl-2.1.28" ]; then
+    patch -p1 < $TP_PATCH_DIR/sasl2-add-k5support-link.patch
+    touch $PATCHED_MARK
+fi
+echo "Finished patching $SASL_SOURCE"
+cd -
+
 # patch arrow
 if [[ -d $TP_SOURCE_DIR/$ARROW_SOURCE ]] ; then
     cd $TP_SOURCE_DIR/$ARROW_SOURCE
@@ -485,8 +474,31 @@ if [[ -d $TP_SOURCE_DIR/$ARROW_SOURCE ]] ; then
         patch -p1 < $TP_PATCH_DIR/arrow-5.0.0-force-use-external-jemalloc.patch
         # fix exception handling
         patch -p1 < $TP_PATCH_DIR/arrow-5.0.0-fix-exception-handling.patch
+        patch -p1 < $TP_PATCH_DIR/arrow-5.0.0-parquet-map-key.patch
         touch $PATCHED_MARK
     fi
     cd -
     echo "Finished patching $ARROW_SOURCE"
+fi
+
+# patch bzip
+if [[ -d $TP_SOURCE_DIR/$BZIP_SOURCE ]] ; then
+    cd $TP_SOURCE_DIR/$BZIP_SOURCE
+    if [ ! -f "$PATCHED_MARK" ] && [[ $BZIP_SOURCE == "bzip2-1.0.8" ]] ; then
+        patch -p1 < "$TP_PATCH_DIR/bzip2-1.0.8.patch"
+        touch "$PATCHED_MARK"
+    fi
+    cd -
+    echo "Finished patching $BZIP_SOURCE"
+fi
+
+# patch bitshuffle
+if [[ -d $TP_SOURCE_DIR/$BITSHUFFLE_SOURCE ]] ; then
+    cd $TP_SOURCE_DIR/$BITSHUFFLE_SOURCE
+    if [ ! -f "$PATCHED_MARK" ] && [[ $BITSHUFFLE_SOURCE == "bitshuffle-0.5.1" ]] ; then
+        patch -p1 < "$TP_PATCH_DIR/bitshuffle-0.5.1.patch"
+        touch "$PATCHED_MARK"
+    fi
+    cd -
+    echo "Finished patching $BITSHUFFLE_SOURCE"
 fi

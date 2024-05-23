@@ -21,18 +21,16 @@ namespace starrocks::pipeline {
 
 // Used for PassthroughExchanger.
 // The input chunk is most likely full, so we don't merge it to avoid copying chunk data.
-Status LocalExchangeSourceOperator::add_chunk(ChunkPtr chunk) {
+void LocalExchangeSourceOperator::add_chunk(ChunkPtr chunk) {
     std::lock_guard<std::mutex> l(_chunk_lock);
     if (_is_finished) {
-        return Status::OK();
+        return;
     }
     size_t memory_usage = chunk->memory_usage();
     size_t num_rows = chunk->num_rows();
     _local_memory_usage += memory_usage;
     _full_chunk_queue.emplace(std::move(chunk));
     _memory_manager->update_memory_usage(memory_usage, num_rows);
-
-    return Status::OK();
 }
 
 // Used for PartitionExchanger.
@@ -43,6 +41,10 @@ Status LocalExchangeSourceOperator::add_chunk(ChunkPtr chunk, const std::shared_
     if (_is_finished) {
         return Status::OK();
     }
+
+    // unpack chunk's const column, since Chunk#append_selective cannot be const column
+    chunk->unpack_and_duplicate_const_columns();
+
     _partition_chunk_queue.emplace(std::move(chunk), std::move(indexes), from, size, memory_usage);
     _partition_rows_num += size;
     _local_memory_usage += memory_usage;
@@ -59,6 +61,9 @@ Status LocalExchangeSourceOperator::add_chunk(ChunkPtr chunk, const std::shared_
     if (_is_finished) {
         return Status::OK();
     }
+
+    // unpack chunk's const column, since Chunk#append_selective cannot be const column
+    chunk->unpack_and_duplicate_const_columns();
 
     auto partition_key = std::make_shared<PartitionKey>(std::make_shared<Columns>(partition_columns), (*indexes)[0]);
     auto partition_entry = _partitions.find(partition_key);
@@ -194,6 +199,7 @@ ChunkPtr LocalExchangeSourceOperator::_pull_shuffle_chunk(RuntimeState* state) {
     ChunkPtr chunk = selected_partition_chunks[0].chunk->clone_empty_with_slot();
     chunk->reserve(num_rows);
     for (const auto& partition_chunk : selected_partition_chunks) {
+        // NOTE: unpack column if `partition_chunk.chunk` constains const column
         chunk->append_selective(*partition_chunk.chunk, partition_chunk.indexes->data(), partition_chunk.from,
                                 partition_chunk.size);
     }
@@ -231,6 +237,7 @@ ChunkPtr LocalExchangeSourceOperator::_pull_key_partition_chunk(RuntimeState* st
     ChunkPtr chunk = selected_partition_chunks[0].chunk->clone_empty_with_slot();
     chunk->reserve(num_rows);
     for (const auto& partition_chunk : selected_partition_chunks) {
+        // NOTE: unpack column if `partition_chunk.chunk` constains const column
         chunk->append_selective(*partition_chunk.chunk, partition_chunk.indexes->data(), partition_chunk.from,
                                 partition_chunk.size);
     }

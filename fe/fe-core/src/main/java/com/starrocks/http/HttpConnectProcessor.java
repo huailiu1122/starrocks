@@ -34,6 +34,7 @@
 package com.starrocks.http;
 
 import com.starrocks.common.UserException;
+import com.starrocks.common.profile.Tracers;
 import com.starrocks.metric.MetricRepo;
 import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.qe.ConnectContext;
@@ -61,14 +62,13 @@ public class HttpConnectProcessor extends ConnectProcessor {
         ctx.getAuditEventBuilder().reset();
         ctx.getAuditEventBuilder()
                 .setTimestamp(System.currentTimeMillis())
-                .setClientIp(
-                        ((HttpConnectContext) ctx).getRemoteIP())
+                .setClientIp(ctx.getRemoteIP())
                 .setUser(ctx.getQualifiedUser())
                 .setAuthorizedUser(
                         ctx.getCurrentUserIdentity() == null ? "null" : ctx.getCurrentUserIdentity().toString())
                 .setDb(ctx.getDatabase())
                 .setCatalog(ctx.getCurrentCatalog());
-        ctx.getPlannerProfile().reset();
+        Tracers.register(ctx);
 
         StatementBase parsedStmt = ((HttpConnectContext) ctx).getStatement();
         String sql = parsedStmt.getOrigStmt().originStmt;
@@ -93,6 +93,7 @@ public class HttpConnectProcessor extends ConnectProcessor {
             // Client failed.
             LOG.warn("Process one query failed because IOException: ", e);
             ctx.getState().setError("StarRocks process failed");
+            ctx.getState().setErrType(QueryState.ErrType.IO_ERR);
         } catch (UserException e) {
             LOG.warn("Process one query failed. SQL: " + sql + ", because.", e);
             ctx.getState().setError(e.getMessage());
@@ -105,8 +106,12 @@ public class HttpConnectProcessor extends ConnectProcessor {
             ctx.getState().setError("Unexpected exception: " + e.getMessage());
             if (parsedStmt instanceof KillStmt) {
                 // ignore kill stmt execute err(not monitor it)
-                ctx.getState().setErrType(QueryState.ErrType.ANALYSIS_ERR);
+                ctx.getState().setErrType(QueryState.ErrType.IGNORE_ERR);
+            } else {
+                ctx.getState().setErrType(QueryState.ErrType.INTERNAL_ERR);
             }
+        } finally {
+            Tracers.close();
         }
 
         // audit after exec

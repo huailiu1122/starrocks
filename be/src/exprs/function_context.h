@@ -30,7 +30,9 @@ class MemPool;
 class RuntimeState;
 
 class Column;
+class Slice;
 struct JavaUDAFContext;
+struct NgramBloomFilterState;
 using ColumnPtr = std::shared_ptr<Column>;
 
 class FunctionContext {
@@ -171,6 +173,10 @@ public:
     // min value is 4, default is 1024
     void set_group_concat_max_len(ssize_t len) { group_concat_max_len = len < 4 ? 4 : len; }
 
+    bool error_if_overflow() const;
+
+    std::unique_ptr<NgramBloomFilterState>& get_ngram_state() { return _ngramState; }
+
 private:
     friend class ExprContext;
 
@@ -213,6 +219,9 @@ private:
     std::vector<bool> _nulls_first;
     bool _is_distinct = false;
     ssize_t group_concat_max_len = 1024;
+
+    // used for ngram bloom filter to speed up some function
+    std::unique_ptr<NgramBloomFilterState> _ngramState;
 };
 
 } // namespace starrocks

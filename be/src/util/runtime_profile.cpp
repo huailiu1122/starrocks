@@ -39,18 +39,12 @@
 #include <iostream>
 #include <memory>
 #include <queue>
-#include <unordered_set>
 #include <utility>
 
-#include "common/config.h"
 #include "common/object_pool.h"
 #include "gutil/map_util.h"
 #include "gutil/strings/substitute.h"
-#include "util/debug_util.h"
-#include "util/monotime.h"
 #include "util/pretty_printer.h"
-#include "util/thread.h"
-#include "util/time.h"
 
 namespace starrocks {
 
@@ -71,7 +65,6 @@ const std::string RuntimeProfile::ROOT_COUNTER = ""; // NOLINT
 RuntimeProfile::RuntimeProfile(std::string name, bool is_averaged_profile)
         : _parent(nullptr),
           _pool(new ObjectPool()),
-          _own_pool(false),
           _name(std::move(name)),
           _metadata(-1),
           _is_averaged_profile(is_averaged_profile),
@@ -148,14 +141,27 @@ void RuntimeProfile::merge(RuntimeProfile* other) {
 
 void RuntimeProfile::update(const TRuntimeProfileTree& thrift_profile) {
     int idx = 0;
-    update(thrift_profile.nodes, &idx);
+    update(thrift_profile.nodes, &idx, false);
     DCHECK_EQ(idx, thrift_profile.nodes.size());
 }
 
-void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* idx) {
+void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* idx, bool is_parent_node_old) {
     DCHECK_LT(*idx, nodes.size());
     const TRuntimeProfileNode& node = nodes[*idx];
+    bool is_node_old;
     {
+        std::lock_guard<std::mutex> l(_version_lock);
+        if (is_parent_node_old || (node.__isset.version && node.version < _version)) {
+            is_node_old = true;
+        } else {
+            is_node_old = false;
+            if (node.__isset.version) {
+                _version = node.version;
+            }
+        }
+    }
+
+    if (!is_node_old) {
         std::lock_guard<std::mutex> l(_counter_lock);
         // update this level
         std::map<std::string, Counter*>::iterator dst_iter;
@@ -186,7 +192,7 @@ void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* 
         }
     }
 
-    {
+    if (!is_node_old) {
         std::lock_guard<std::mutex> l(_info_strings_lock);
         const InfoStrings& info_strings = node.info_strings;
         for (const std::string& key : node.info_strings_display_order) {
@@ -226,7 +232,7 @@ void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* 
                 _children.push_back(std::make_pair(child, tchild.indent));
             }
 
-            child->update(nodes, idx);
+            child->update(nodes, idx, is_node_old);
         }
     }
 }
@@ -419,13 +425,24 @@ void RuntimeProfile::copy_all_info_strings_from(RuntimeProfile* src_profile) {
             if (size_t pos; (pos = key.find("__DUP(")) != std::string::npos) {
                 original_key = key.substr(0, pos);
             }
-            size_t i = 0;
+            int32_t offset = -1;
+            int32_t previous_offset;
+            int32_t step = 1;
             while (true) {
-                const std::string indexed_key = strings::Substitute("$0__DUP($1)", original_key, i++);
+                previous_offset = offset;
+                offset += step;
+                const std::string indexed_key = strings::Substitute("$0__DUP($1)", original_key, offset);
                 if (get_info_string(indexed_key) == nullptr) {
-                    add_info_string(indexed_key, value);
-                    break;
+                    if (step == 1) {
+                        add_info_string(indexed_key, value);
+                        break;
+                    }
+                    // Forward too much, try to forward half of the former size
+                    offset = previous_offset;
+                    step >>= 1;
+                    continue;
                 }
+                step <<= 1;
             }
         }
     }
@@ -448,6 +465,7 @@ void RuntimeProfile::copy_all_info_strings_from(RuntimeProfile* src_profile) {
     }
 
 ADD_COUNTER_IMPL(AddHighWaterMarkCounter, HighWaterMarkCounter)
+ADD_COUNTER_IMPL(AddLowWaterMarkCounter, LowWaterMarkCounter)
 
 RuntimeProfile::Counter* RuntimeProfile::add_child_counter(const std::string& name, TUnit::type type,
                                                            const TCounterStrategy& strategy,
@@ -738,6 +756,11 @@ void RuntimeProfile::to_thrift(std::vector<TRuntimeProfileNode>* nodes) {
     node.metadata = _metadata;
     node.indent = true;
 
+    {
+        std::lock_guard<std::mutex> l(_version_lock);
+        node.__set_version(_version);
+    }
+
     CounterMap counter_map;
     {
         std::lock_guard<std::mutex> l(_counter_lock);
@@ -811,9 +834,6 @@ RuntimeProfile::EventSequence* RuntimeProfile::add_event_sequence(const std::str
 RuntimeProfile* RuntimeProfile::merge_isomorphic_profiles(ObjectPool* obj_pool, std::vector<RuntimeProfile*>& profiles,
                                                           bool require_identical) {
     DCHECK(!profiles.empty());
-
-    static const std::string MERGED_INFO_PREFIX_MIN = "__MIN_OF_";
-    static const std::string MERGED_INFO_PREFIX_MAX = "__MAX_OF_";
 
     // all metrics will be merged into the first profile
     auto* merged_profile = obj_pool->add(new RuntimeProfile(profiles[0]->name(), profiles[0]->_is_averaged_profile));
@@ -926,20 +946,23 @@ RuntimeProfile* RuntimeProfile::merge_isomorphic_profiles(ObjectPool* obj_pool, 
                     break;
                 }
 
-                auto* min_counter = profile->get_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MIN, name));
-                if (min_counter != nullptr) {
-                    already_merged = true;
-                    if (min_counter->value() < min_value) {
-                        min_value = min_counter->value();
+                if (!counter->skip_min_max()) {
+                    auto* min_counter = profile->get_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MIN, name));
+                    if (min_counter != nullptr) {
+                        already_merged = true;
+                        if (min_counter->value() < min_value) {
+                            min_value = min_counter->value();
+                        }
+                    }
+                    auto* max_counter = profile->get_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MAX, name));
+                    if (max_counter != nullptr) {
+                        already_merged = true;
+                        if (max_counter->value() > max_value) {
+                            max_value = max_counter->value();
+                        }
                     }
                 }
-                auto* max_counter = profile->get_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MAX, name));
-                if (max_counter != nullptr) {
-                    already_merged = true;
-                    if (max_counter->value() > max_value) {
-                        max_value = max_counter->value();
-                    }
-                }
+
                 counters.push_back(counter);
             }
 
@@ -966,14 +989,16 @@ RuntimeProfile* RuntimeProfile::merge_isomorphic_profiles(ObjectPool* obj_pool, 
 
                 merged_counter->set(merged_value);
 
-                auto* min_counter =
-                        merged_profile->add_child_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MIN, name),
-                                                          type, merged_counter->strategy(), name);
-                auto* max_counter =
-                        merged_profile->add_child_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MAX, name),
-                                                          type, merged_counter->strategy(), name);
-                min_counter->set(min_value);
-                max_counter->set(max_value);
+                if (!merged_counter->skip_min_max()) {
+                    auto* min_counter =
+                            merged_profile->add_child_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MIN, name),
+                                                              type, merged_counter->strategy(), name);
+                    auto* max_counter =
+                            merged_profile->add_child_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MAX, name),
+                                                              type, merged_counter->strategy(), name);
+                    min_counter->set(min_value);
+                    max_counter->set(max_value);
+                }
             }
         }
     }
@@ -998,13 +1023,15 @@ RuntimeProfile* RuntimeProfile::merge_isomorphic_profiles(ObjectPool* obj_pool, 
                     auto* child = profile->get_child(child_name);
                     if (child == nullptr) {
                         identical = false;
-                        LOG(INFO) << "find non-isomorphic children, profile_name=" << profile->name()
-                                  << ", required_child_name=" << child_name;
+                        if (require_identical) {
+                            LOG(INFO) << "find non-isomorphic children, profile_name=" << profile->name()
+                                      << ", required_child_name=" << child_name;
+                        }
                         continue;
                     }
                     sub_profiles.push_back(child);
                 }
-                auto* merged_child = merge_isomorphic_profiles(obj_pool, sub_profiles);
+                auto* merged_child = merge_isomorphic_profiles(obj_pool, sub_profiles, require_identical);
                 merged_profile->add_child(merged_child, prototype_kv.second, nullptr);
             }
             if (require_identical && !identical) {

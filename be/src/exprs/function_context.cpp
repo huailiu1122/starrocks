@@ -22,6 +22,7 @@
 #include "column/type_traits.h"
 #include "exprs/agg/java_udaf_function.h"
 #include "runtime/runtime_state.h"
+#include "storage/rowset/bloom_filter.h"
 #include "types/logical_type_infra.h"
 
 namespace starrocks {
@@ -154,6 +155,10 @@ const char* FunctionContext::error_msg() const {
     } else {
         return nullptr;
     }
+}
+
+bool FunctionContext::error_if_overflow() const {
+    return _state != nullptr && _state->error_if_overflow();
 }
 
 void FunctionContext::set_function_state(FunctionStateScope scope, void* ptr) {

@@ -25,6 +25,7 @@ import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalLimitOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalUnionOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -36,6 +37,7 @@ import com.starrocks.sql.optimizer.rewrite.BaseScalarOperatorShuttle;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public class OptExpressionValidator extends OptExpressionVisitor<OptExpression, Void> {
 
@@ -76,6 +78,11 @@ public class OptExpressionValidator extends OptExpressionVisitor<OptExpression, 
 
     @Override
     public OptExpression visitLogicalLimit(OptExpression optExpression, Void context) {
+        LogicalLimitOperator limit = optExpression.getOp().cast();
+        if (limit.hasOffset() && limit.isLocal()) {
+            ErrorReport.reportValidateException(ErrorCode.ERR_PLAN_VALIDATE_ERROR,
+                    ErrorType.INTERNAL_ERROR, optExpression, "offset limit transfer error, must be gather operator");
+        }
         return commonValidate(optExpression);
     }
 
@@ -251,9 +258,8 @@ public class OptExpressionValidator extends OptExpressionVisitor<OptExpression, 
         }
 
         private void checkDateType(ConstantOperator constant, Type toType) {
-            try {
-                constant.castTo(toType);
-            } catch (Exception e) {
+            Optional<ConstantOperator> res = constant.castTo(toType);
+            if (!res.isPresent()) {
                 ErrorReport.reportValidateException(ErrorCode.ERR_INVALID_DATE_ERROR,
                         ErrorType.USER_ERROR, toType, constant.getValue());
             }

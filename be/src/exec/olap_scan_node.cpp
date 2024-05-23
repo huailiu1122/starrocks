@@ -14,11 +14,15 @@
 
 #include "exec/olap_scan_node.h"
 
+#include <algorithm>
 #include <chrono>
+#include <functional>
 #include <thread>
 
+#include "column/column_access_path.h"
 #include "column/column_pool.h"
 #include "column/type_traits.h"
+#include "common/compiler_util.h"
 #include "common/status.h"
 #include "exec/olap_scan_prepare.h"
 #include "exec/pipeline/limit_operator.h"
@@ -29,6 +33,7 @@
 #include "exec/pipeline/scan/olap_scan_prepare_operator.h"
 #include "exprs/expr_context.h"
 #include "exprs/runtime_filter_bank.h"
+#include "gen_cpp/RuntimeProfile_types.h"
 #include "glog/logging.h"
 #include "gutil/casts.h"
 #include "runtime/current_thread.h"
@@ -68,6 +73,17 @@ Status OlapScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
         _output_chunk_by_bucket = tnode.olap_scan_node.output_chunk_by_bucket;
     }
 
+    // desc hint related optimize only takes effect when there is no order requirement
+    if (!_sorted_by_keys_per_tablet) {
+        if (tnode.olap_scan_node.__isset.output_asc_hint) {
+            _output_asc_hint = tnode.olap_scan_node.output_asc_hint;
+        }
+
+        if (tnode.olap_scan_node.__isset.partition_order_hint) {
+            _partition_order_hint = tnode.olap_scan_node.partition_order_hint;
+        }
+    }
+
     if (_olap_scan_node.__isset.bucket_exprs) {
         const auto& bucket_exprs = _olap_scan_node.bucket_exprs;
         _bucket_exprs.resize(bucket_exprs.size());
@@ -84,9 +100,12 @@ Status OlapScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
 
     if (_olap_scan_node.__isset.column_access_paths) {
         for (int i = 0; i < _olap_scan_node.column_access_paths.size(); ++i) {
-            auto path = std::make_unique<ColumnAccessPath>();
-            if (path->init(_olap_scan_node.column_access_paths[i], state, _pool).ok()) {
-                _column_access_paths.emplace_back(std::move(path));
+            auto st = ColumnAccessPath::create(_olap_scan_node.column_access_paths[i], state, _pool);
+            if (LIKELY(st.ok())) {
+                _column_access_paths.emplace_back(std::move(st.value()));
+            } else {
+                LOG(WARNING) << "Failed to create column access path: " << _olap_scan_node.column_access_paths[i].type
+                             << "index: " << i << ", error: " << st.status();
             }
         }
     }
@@ -121,13 +140,13 @@ Status OlapScanNode::prepare(RuntimeState* state) {
 Status OlapScanNode::open(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_CANCELLED(state);
+    DictOptimizeParser::disable_open_rewrite(&_conjunct_ctxs);
     RETURN_IF_ERROR(ExecNode::open(state));
 
     Status status;
     RETURN_IF_ERROR(OlapScanConjunctsManager::eval_const_conjuncts(_conjunct_ctxs, &status));
     _update_status(status);
 
-    _dict_optimize_parser.set_mutable_dict_maps(state, state->mutable_query_global_dict_map());
     DictOptimizeParser::rewrite_descriptor(state, _conjunct_ctxs, _olap_scan_node.dict_string_id_to_int_ids,
                                            &(_tuple_desc->decoded_slots()));
 
@@ -191,7 +210,7 @@ Status OlapScanNode::get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) {
         // is the first time of calling `get_next`, pass the second argument of `_fill_chunk_pool` as
         // true to ensure that the newly allocated column objects will be returned back into the column
         // pool.
-        TRY_CATCH_BAD_ALLOC(_fill_chunk_pool(1, first_call));
+        TRY_CATCH_BAD_ALLOC(_fill_chunk_pool(1, first_call && state->use_column_pool()));
         eval_join_runtime_filters(chunk);
         _num_rows_returned += (*chunk)->num_rows();
         COUNTER_SET(_rows_returned_counter, _num_rows_returned);
@@ -219,7 +238,7 @@ void OlapScanNode::close(RuntimeState* state) {
     if (is_closed()) {
         return;
     }
-    exec_debug_action(TExecNodePhase::CLOSE);
+    (void)exec_debug_action(TExecNodePhase::CLOSE);
     _update_status(Status::Cancelled("closed"));
     _result_chunks.shutdown();
     while (_running_threads.load(std::memory_order_acquire) > 0) {
@@ -236,8 +255,6 @@ void OlapScanNode::close(RuntimeState* state) {
     while (_result_chunks.blocking_get(&chunk)) {
         chunk.reset();
     }
-
-    _dict_optimize_parser.close(state);
 
     if (runtime_state() != nullptr) {
         // Reduce the memory usage if the the average string size is greater than 512.
@@ -397,8 +414,21 @@ StatusOr<pipeline::MorselQueuePtr> OlapScanNode::convert_scan_range_to_morsel_qu
         morsels.emplace_back(std::make_unique<pipeline::ScanMorsel>(node_id, scan_range));
     }
 
+    if (partition_order_hint().has_value()) {
+        bool asc = partition_order_hint().value();
+        std::stable_sort(morsels.begin(), morsels.end(), [asc](auto& l, auto& r) {
+            auto l_partition_id = down_cast<pipeline::ScanMorsel*>(l.get())->partition_id();
+            auto r_partition_id = down_cast<pipeline::ScanMorsel*>(r.get())->partition_id();
+            if (asc) {
+                return std::less()(l_partition_id, r_partition_id);
+            } else {
+                return std::greater()(l_partition_id, r_partition_id);
+            }
+        });
+    }
+
     if (output_chunk_by_bucket()) {
-        std::sort(morsels.begin(), morsels.end(), [](auto& l, auto& r) {
+        std::stable_sort(morsels.begin(), morsels.end(), [](auto& l, auto& r) {
             return down_cast<pipeline::ScanMorsel*>(l.get())->owner_id() <
                    down_cast<pipeline::ScanMorsel*>(r.get())->owner_id();
         });
@@ -491,14 +521,6 @@ Status OlapScanNode::collect_query_statistics(QueryStatistics* statistics) {
 Status OlapScanNode::_start_scan(RuntimeState* state) {
     RETURN_IF_CANCELLED(state);
 
-    OlapScanConjunctsManager& cm = _conjuncts_manager;
-    cm.conjunct_ctxs_ptr = &_conjunct_ctxs;
-    cm.tuple_desc = _tuple_desc;
-    cm.obj_pool = _pool;
-    cm.key_column_names = &_olap_scan_node.sort_key_column_names;
-    cm.runtime_filters = &_runtime_filter_collector;
-    cm.runtime_state = state;
-
     const TQueryOptions& query_options = state->query_options();
     int32_t max_scan_key_num;
     if (query_options.__isset.max_scan_key_num && query_options.max_scan_key_num > 0) {
@@ -511,7 +533,22 @@ Status OlapScanNode::_start_scan(RuntimeState* state) {
     if (_olap_scan_node.__isset.enable_column_expr_predicate) {
         enable_column_expr_predicate = _olap_scan_node.enable_column_expr_predicate;
     }
-    RETURN_IF_ERROR(cm.parse_conjuncts(scan_keys_unlimited, max_scan_key_num, enable_column_expr_predicate));
+
+    OlapScanConjunctsManagerOptions opts;
+    opts.conjunct_ctxs_ptr = &_conjunct_ctxs;
+    opts.tuple_desc = _tuple_desc;
+    opts.obj_pool = _pool;
+    opts.key_column_names = &_olap_scan_node.sort_key_column_names;
+    opts.runtime_filters = &_runtime_filter_collector;
+    opts.runtime_state = state;
+    opts.scan_keys_unlimited = scan_keys_unlimited;
+    opts.max_scan_key_num = max_scan_key_num;
+    opts.enable_column_expr_predicate = enable_column_expr_predicate;
+
+    _conjuncts_manager = std::make_unique<OlapScanConjunctsManager>(std::move(opts));
+    OlapScanConjunctsManager& cm = *_conjuncts_manager;
+
+    RETURN_IF_ERROR(cm.parse_conjuncts());
     RETURN_IF_ERROR(_start_scan_thread(state));
 
     return Status::OK();
@@ -532,6 +569,8 @@ void OlapScanNode::_init_counter(RuntimeState* state) {
     _cached_pages_num_counter = ADD_COUNTER(_scan_profile, "CachedPagesNum", TUnit::UNIT);
     _pushdown_predicates_counter =
             ADD_COUNTER_SKIP_MERGE(_scan_profile, "PushdownPredicates", TUnit::UNIT, TCounterMergeType::SKIP_ALL);
+    _pushdown_access_paths_counter =
+            ADD_COUNTER_SKIP_MERGE(_scan_profile, "PushdownAccessPaths", TUnit::UNIT, TCounterMergeType::SKIP_ALL);
 
     _get_rowsets_timer = ADD_TIMER(_scan_profile, "GetRowsets");
     _get_delvec_timer = ADD_TIMER(_scan_profile, "GetDelVec");
@@ -542,6 +581,8 @@ void OlapScanNode::_init_counter(RuntimeState* state) {
     _bi_filter_timer = ADD_CHILD_TIMER(_scan_profile, "BitmapIndexFilter", "SegmentInit");
     _bi_filtered_counter = ADD_CHILD_COUNTER(_scan_profile, "BitmapIndexFilterRows", TUnit::UNIT, "SegmentInit");
     _bf_filtered_counter = ADD_CHILD_COUNTER(_scan_profile, "BloomFilterFilterRows", TUnit::UNIT, "SegmentInit");
+    _gin_filtered_counter = ADD_CHILD_COUNTER(_runtime_profile, "GinFilterRows", TUnit::UNIT, "SegmentInit");
+    _gin_filtered_timer = ADD_CHILD_TIMER(_runtime_profile, "GinFilter", "SegmentInit");
     _seg_zm_filtered_counter = ADD_CHILD_COUNTER(_scan_profile, "SegmentZoneMapFilterRows", TUnit::UNIT, "SegmentInit");
     _seg_rt_filtered_counter =
             ADD_CHILD_COUNTER(_scan_profile, "SegmentRuntimeZoneMapFilterRows", TUnit::UNIT, "SegmentInit");
@@ -627,11 +668,11 @@ Status OlapScanNode::_start_scan_thread(RuntimeState* state) {
     }
 
     std::vector<std::unique_ptr<OlapScanRange>> key_ranges;
-    RETURN_IF_ERROR(_conjuncts_manager.get_key_ranges(&key_ranges));
+    RETURN_IF_ERROR(_conjuncts_manager->get_key_ranges(&key_ranges));
     std::vector<ExprContext*> conjunct_ctxs;
-    _conjuncts_manager.get_not_push_down_conjuncts(&conjunct_ctxs);
+    _conjuncts_manager->get_not_push_down_conjuncts(&conjunct_ctxs);
 
-    _dict_optimize_parser.rewrite_conjuncts(&conjunct_ctxs, state);
+    RETURN_IF_ERROR(state->mutable_dict_optimize_parser()->rewrite_conjuncts(&conjunct_ctxs));
 
     int tablet_count = _scan_ranges.size();
     for (int k = 0; k < tablet_count; ++k) {
@@ -688,7 +729,7 @@ Status OlapScanNode::_start_scan_thread(RuntimeState* state) {
     COUNTER_SET(_task_concurrency, (int64_t)concurrency);
     int chunks = _chunks_per_scanner * concurrency;
     _chunk_pool.reserve(chunks);
-    TRY_CATCH_BAD_ALLOC(_fill_chunk_pool(chunks, true));
+    TRY_CATCH_BAD_ALLOC(_fill_chunk_pool(chunks, state->use_column_pool()));
     std::lock_guard<std::mutex> l(_mtx);
     for (int i = 0; i < concurrency; i++) {
         CHECK(_submit_scanner(_pending_scanners.pop(), true));
@@ -837,6 +878,9 @@ pipeline::OpFactories OlapScanNode::decompose_to_pipeline(pipeline::PipelineBuil
                                                                                       this, scan_ctx_factory);
     scan_prepare_op->set_degree_of_parallelism(shared_morsel_queue ? 1 : dop);
     this->init_runtime_filter_for_operator(scan_prepare_op.get(), context, rc_rf_probe_collector);
+
+    auto exec_group = context->find_exec_group_by_plan_node_id(_id);
+    context->set_current_execution_group(exec_group);
 
     auto scan_prepare_pipeline = pipeline::OpFactories{
             std::move(scan_prepare_op),

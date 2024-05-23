@@ -18,14 +18,20 @@ package com.starrocks.sql.optimizer.rewrite;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
+import com.starrocks.analysis.Expr;
+import com.starrocks.analysis.FunctionCallExpr;
 import com.starrocks.analysis.LiteralExpr;
 import com.starrocks.catalog.Column;
+import com.starrocks.catalog.ExpressionRangePartitionInfo;
+import com.starrocks.catalog.ExpressionRangePartitionInfoV2;
+import com.starrocks.catalog.FunctionSet;
 import com.starrocks.catalog.ListPartitionInfo;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.catalog.PartitionKey;
 import com.starrocks.catalog.PartitionType;
+import com.starrocks.catalog.PrimitiveType;
 import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Pair;
@@ -162,27 +168,29 @@ public class OptOlapPartitionPruner {
             }
 
             // None/Null bound predicate can't prune
-            if ((null == pcf.lowerBound || pcf.lowerBound.isConstantNull()) &&
-                    (null == pcf.upperBound || pcf.upperBound.isConstantNull())) {
+            LiteralExpr lowerBound = pcf.getLowerBound();
+            LiteralExpr upperBound = pcf.getUpperBound();
+            if ((null == lowerBound || lowerBound.isConstantNull()) &&
+                    (null == upperBound || upperBound.isConstantNull())) {
                 continue;
             }
 
             boolean lowerBind = true;
             boolean upperBind = true;
-            if (null != pcf.lowerBound) {
+            if (null != lowerBound) {
                 lowerBind = false;
                 PartitionKey min = new PartitionKey();
-                min.pushColumn(pcf.lowerBound, column.getPrimitiveType());
+                min.pushColumn(pcf.getLowerBound(), column.getPrimitiveType());
                 int cmp = minRange.compareTo(min);
                 if (cmp > 0 || (0 == cmp && pcf.lowerBoundInclusive)) {
                     lowerBind = true;
                 }
             }
 
-            if (null != pcf.upperBound) {
+            if (null != upperBound) {
                 upperBind = false;
                 PartitionKey max = new PartitionKey();
-                max.pushColumn(pcf.upperBound, column.getPrimitiveType());
+                max.pushColumn(upperBound, column.getPrimitiveType());
                 int cmp = maxRange.compareTo(max);
                 if (cmp < 0 || (0 == cmp && pcf.upperBoundInclusive)) {
                     upperBind = true;
@@ -200,7 +208,7 @@ public class OptOlapPartitionPruner {
 
         scanPredicates.removeAll(prunedPartitionPredicates);
 
-        if (column.isAllowNull() && containsNullValue(column, minRange)
+        if (column.isAllowNull() && containsNullValue(minRange)
                 && !checkFilterNullValue(scanPredicates, logicalOlapScanOperator.getPredicate().clone())) {
             return null;
         }
@@ -300,7 +308,7 @@ public class OptOlapPartitionPruner {
 
         List<ScalarOperator> scalarOperatorList = Utils.extractConjuncts(operator.getPredicate());
         PartitionPruner partitionPruner = new ListPartitionPruner(columnToPartitionValuesMap,
-                columnToNullPartitions, scalarOperatorList, specifyPartitionIds);
+                columnToNullPartitions, scalarOperatorList, specifyPartitionIds, listPartitionInfo);
         try {
             List<Long> prune = partitionPruner.prune();
             if (prune == null && isTemporaryPartitionPrune) {
@@ -311,13 +319,13 @@ public class OptOlapPartitionPruner {
         } catch (AnalysisException e) {
             LOG.warn("PartitionPrune Failed. ", e);
         }
-        return null;
+        return specifyPartitionIds;
     }
 
     private static List<Long> rangePartitionPrune(OlapTable olapTable, RangePartitionInfo partitionInfo,
                                                   LogicalOlapScanOperator operator) {
         Map<Long, Range<PartitionKey>> keyRangeById;
-        if (operator.getPartitionNames() != null) {
+        if (operator.getPartitionNames() != null && operator.getPartitionNames().getPartitionNames() != null) {
             keyRangeById = Maps.newHashMap();
             for (String partName : operator.getPartitionNames().getPartitionNames()) {
                 Partition part = olapTable.getPartition(partName, operator.getPartitionNames().isTemp());
@@ -333,42 +341,55 @@ public class OptOlapPartitionPruner {
                 partitionInfo.getPartitionColumns(), operator.getColumnFilters());
         try {
             return partitionPruner.prune();
-        } catch (AnalysisException e) {
+        } catch (Exception e) {
             LOG.warn("PartitionPrune Failed. ", e);
         }
-        return null;
+        return Lists.newArrayList(keyRangeById.keySet());
     }
 
     private static boolean isNeedFurtherPrune(List<Long> candidatePartitions, LogicalOlapScanOperator olapScanOperator,
                                               PartitionInfo partitionInfo) {
-        boolean probeResult = true;
-        if (candidatePartitions.isEmpty()) {
-            probeResult = false;
-        } else if (!partitionInfo.isRangePartition()) {
-            probeResult = false;
-        } else if (((RangePartitionInfo) partitionInfo).getPartitionColumns().size() > 1) {
-            probeResult = false;
-        } else if (((RangePartitionInfo) partitionInfo).getIdToRange(true)
-                .containsKey(candidatePartitions.get(0))) {
-            // it's a temp partition list, no need to do the further prune
-            probeResult = false;
-        } else if (olapScanOperator.getPredicate() == null) {
-            probeResult = false;
+        if (candidatePartitions.isEmpty()
+                || olapScanOperator.getPredicate() == null) {
+            return false;
         }
 
-        return probeResult;
+        // only support RANGE and EXPR_RANGE
+        // EXPR_RANGE_V2 type like partition by RANGE(cast(substring(col, 3)) as int)) is unsupported
+        if (partitionInfo instanceof ExpressionRangePartitionInfo) {
+            ExpressionRangePartitionInfo exprPartitionInfo = (ExpressionRangePartitionInfo) partitionInfo;
+            List<Expr> partitionExpr = exprPartitionInfo.getPartitionExprs();
+            if (partitionExpr.size() == 1 && partitionExpr.get(0) instanceof FunctionCallExpr) {
+                FunctionCallExpr functionCallExpr = (FunctionCallExpr) partitionExpr.get(0);
+                String functionName = functionCallExpr.getFnName().getFunction();
+                return (FunctionSet.DATE_TRUNC.equalsIgnoreCase(functionName)
+                        || FunctionSet.TIME_SLICE.equalsIgnoreCase(functionName))
+                        && !exprPartitionInfo.getIdToRange(true).containsKey(candidatePartitions.get(0));
+            }
+        } else if (partitionInfo instanceof ExpressionRangePartitionInfoV2) {
+            return false;
+        } else if (partitionInfo instanceof RangePartitionInfo) {
+            RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) partitionInfo;
+            return rangePartitionInfo.getPartitionColumns().size() == 1
+                    && !rangePartitionInfo.getIdToRange(true).containsKey(candidatePartitions.get(0));
+        }
+        return false;
     }
 
-    private static boolean containsNullValue(Column column, PartitionKey minRange) {
+    private static boolean containsNullValue(PartitionKey minRange) {
         PartitionKey nullValue = new PartitionKey();
         try {
-            nullValue.pushColumn(LiteralExpr.createInfinity(column.getType(), false), column.getPrimitiveType());
+            for (int i = 0; i < minRange.getKeys().size(); ++i) {
+                LiteralExpr rangeKey = minRange.getKeys().get(i);
+                PrimitiveType type = minRange.getTypes().get(i);
+                nullValue.pushColumn(LiteralExpr.createInfinity(rangeKey.getType(), false), type);
+            }
+
             return minRange.compareTo(nullValue) <= 0;
         } catch (AnalysisException e) {
             return false;
         }
     }
-
 
     private static boolean checkFilterNullValue(List<ScalarOperator> scanPredicates, ScalarOperator predicate) {
         ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();

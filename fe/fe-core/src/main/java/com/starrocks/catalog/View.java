@@ -66,11 +66,6 @@ import java.util.Map;
 public class View extends Table {
     private static final Logger LOG = LogManager.getLogger(GlobalStateMgr.class);
 
-    enum ViewStatus {
-        NORMAL,
-        INVALID,
-    }
-
     // The original SQL-string given as view definition. Set during analysis.
     // Corresponds to Hive's viewOriginalText.
     @Deprecated
@@ -95,12 +90,6 @@ public class View extends Table {
     @SerializedName(value = "m")
     private long sqlMode = 0L;
 
-    @SerializedName(value = "status")
-    private ViewStatus status = ViewStatus.NORMAL;
-
-    @SerializedName(value = "reason")
-    private String reason = "";
-
     // cache used table names
     private List<TableName> tableRefsCache = Lists.newArrayList();
 
@@ -110,7 +99,11 @@ public class View extends Table {
     }
 
     public View(long id, String name, List<Column> schema) {
-        super(id, name, TableType.VIEW, schema);
+        this(id, name, schema, TableType.VIEW);
+    }
+
+    public View(long id, String name, List<Column> schema, TableType type) {
+        super(id, name, type, schema);
     }
 
     public QueryStatement getQueryStatement() throws StarRocksPlannerException {
@@ -137,8 +130,6 @@ public class View extends Table {
     public void setInlineViewDefWithSqlMode(String inlineViewDef, long sqlMode) {
         this.inlineViewDef = inlineViewDef;
         this.sqlMode = sqlMode;
-        this.status = ViewStatus.NORMAL;
-        this.reason = "";
     }
 
     public String getInlineViewDef() {
@@ -159,43 +150,28 @@ public class View extends Table {
         try {
             node = com.starrocks.sql.parser.SqlParser.parse(inlineViewDef, sqlMode).get(0);
         } catch (Exception e) {
-            LOG.info("stmt is {}", inlineViewDef);
-            LOG.info("exception because: ", e);
-            LOG.info("msg is {}", inlineViewDef);
+            LOG.warn("view-definition: {}. got exception: {}", inlineViewDef, e.getMessage(), e);
             // Do not pass e as the exception cause because it might reveal the existence
             // of tables that the user triggering this load may not have privileges on.
             throw new UserException(
-                    String.format("Failed to parse view-definition statement of view: %s", name), e);
+                    String.format("Failed to parse view: %s. Its definition is:%n%s ", name, inlineViewDef));
         }
         // Make sure the view definition parses to a query statement.
         if (!(node instanceof QueryStatement)) {
-            throw new UserException(String.format("View definition of %s " +
-                    "is not a query statement", name));
+            throw new UserException(String.format("View %s without query statement. Its definition is:%n%s",
+                    name, inlineViewDef));
         }
         return (QueryStatement) node;
     }
 
     public synchronized List<TableName> getTableRefs() {
-        if (this.tableRefsCache.isEmpty() || this.status != ViewStatus.NORMAL) {
+        if (this.tableRefsCache.isEmpty()) {
             QueryStatement qs = getQueryStatement();
             Map<TableName, Table> allTables = AnalyzerUtils.collectAllTableAndView(qs);
             this.tableRefsCache = Lists.newArrayList(allTables.keySet());
         }
 
         return Lists.newArrayList(this.tableRefsCache);
-    }
-
-    public void setInvalid(String reason) {
-        this.status = ViewStatus.INVALID;
-        this.reason = reason;
-    }
-
-    public boolean isInvalid() {
-        return status == ViewStatus.INVALID;
-    }
-
-    public String getReason() {
-        return reason;
     }
 
     @Override

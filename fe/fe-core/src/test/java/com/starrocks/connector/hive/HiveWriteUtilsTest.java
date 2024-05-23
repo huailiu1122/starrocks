@@ -29,7 +29,7 @@ import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 
-import static com.starrocks.connector.hive.MockedRemoteFileSystem.TEST_FILES;
+import static com.starrocks.connector.hive.MockedRemoteFileSystem.HDFS_HIVE_TABLE;
 
 public class HiveWriteUtilsTest {
     @Test
@@ -40,10 +40,10 @@ public class HiveWriteUtilsTest {
     @Test
     public void checkLocationProp() {
         Map<String, String> conf = new HashMap<>();
-        conf.put("location", "xxx");
+        conf.put("external_location", "xxx");
         ExceptionChecker.expectThrowsWithMsg(DdlException.class,
                 "Can't create non-managed Hive table. Only supports creating hive table under Database location. " +
-                        "You could execute command without location properties",
+                        "You could execute command without external_location properties",
                 () -> HiveWriteUtils.checkLocationProperties(conf));
     }
 
@@ -57,7 +57,7 @@ public class HiveWriteUtilsTest {
         new MockUp<FileSystem>() {
             @Mock
             public FileSystem get(URI uri, Configuration conf) {
-                return new MockedRemoteFileSystem(TEST_FILES);
+                return new MockedRemoteFileSystem(HDFS_HIVE_TABLE);
             }
         };
         Assert.assertFalse(HiveWriteUtils.pathExists(path, new Configuration()));
@@ -73,7 +73,7 @@ public class HiveWriteUtilsTest {
         new MockUp<FileSystem>() {
             @Mock
             public FileSystem get(URI uri, Configuration conf) {
-                return new MockedRemoteFileSystem(TEST_FILES);
+                return new MockedRemoteFileSystem(HDFS_HIVE_TABLE);
             }
         };
         Assert.assertFalse(HiveWriteUtils.isDirectory(path, new Configuration()));
@@ -89,7 +89,7 @@ public class HiveWriteUtilsTest {
         new MockUp<FileSystem>() {
             @Mock
             public FileSystem get(URI uri, Configuration conf) {
-                return new MockedRemoteFileSystem(TEST_FILES);
+                return new MockedRemoteFileSystem(HDFS_HIVE_TABLE);
             }
         };
         ExceptionChecker.expectThrowsWithMsg(StarRocksConnectorException.class,

@@ -50,15 +50,19 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.TreeNode;
 import com.starrocks.common.UserException;
 import com.starrocks.sql.common.PermutationGenerator;
+import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
+import com.starrocks.sql.optimizer.transformer.SqlToScalarOperatorTranslator;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TNormalPlanNode;
 import com.starrocks.thrift.TPlan;
 import com.starrocks.thrift.TPlanNode;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
+import org.roaringbitmap.RoaringBitmap;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -171,6 +175,10 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
 
     public List<RuntimeFilterDescription> getProbeRuntimeFilters() {
         return probeRuntimeFilters;
+    }
+
+    public void setProbeRuntimeFilters(List<RuntimeFilterDescription> runtimeFilters) {
+        this.probeRuntimeFilters = runtimeFilters;
     }
 
     public void clearProbeRuntimeFilters() {
@@ -562,6 +570,9 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     }
 
     public void computeStatistics(Statistics statistics) {
+        if (null == statistics) {
+            return;
+        }
         cardinality = Math.round(statistics.getOutputRowCount());
         avgRowSize = (float) statistics.getColumnStatistics().values().stream().
                 mapToDouble(columnStatistic -> columnStatistic.getAverageRowSize()).sum();
@@ -781,8 +792,10 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     /**
      * When push down runtime filter cross exchange, need take care partitionByExprs of exchange.
      */
-    public boolean pushDownRuntimeFilters(DescriptorTable descTbl, RuntimeFilterDescription description, Expr probeExpr,
+    public boolean pushDownRuntimeFilters(RuntimeFilterPushDownContext context, Expr probeExpr,
                                           List<Expr> partitionByExprs) {
+        RuntimeFilterDescription description = context.getDescription();
+        DescriptorTable descTbl = context.getDescTbl();
         if (!canPushDownRuntimeFilter()) {
             return false;
         }
@@ -798,13 +811,13 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         boolean accept = false;
         for (PlanNode node : children) {
             if (candidatePartitionByExprs.isEmpty()) {
-                if (node.pushDownRuntimeFilters(descTbl, description, probeExpr, Lists.newArrayList())) {
+                if (node.pushDownRuntimeFilters(context, probeExpr, Lists.newArrayList())) {
                     accept = true;
                     break;
                 }
             } else {
                 for (List<Expr> candidateOfPartitionByExprs : candidatePartitionByExprs) {
-                    if (node.pushDownRuntimeFilters(descTbl, description, probeExpr, candidateOfPartitionByExprs)) {
+                    if (node.pushDownRuntimeFilters(context, probeExpr, candidateOfPartitionByExprs)) {
                         accept = true;
                         break;
                     }
@@ -819,7 +832,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         if (accept) {
             return true;
         }
-        if (isBound && description.canProbeUse(this)) {
+        if (isBound && description.canProbeUse(this, context)) {
             description.addProbeExpr(id.asInt(), probeExpr);
             description.addPartitionByExprsIfNeeded(id.asInt(), probeExpr, partitionByExprs);
             probeRuntimeFilters.add(description);
@@ -827,12 +840,25 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         }
         return false;
     }
+
     protected Function<Expr, Boolean> couldBound(RuntimeFilterDescription rfDesc, DescriptorTable descTbl) {
-        return (Expr expr) -> couldBound(expr ,rfDesc, descTbl);
+        return (Expr expr) -> couldBound(expr, rfDesc, descTbl);
     }
 
     protected Function<Expr, Boolean> couldBoundForPartitionExpr() {
         return (Expr expr) -> expr.isBoundByTupleIds(getTupleIds());
+    }
+
+    private RoaringBitmap cachedSlotIds = null;
+
+    public RoaringBitmap getSlotIds(DescriptorTable descTbl) {
+        if (cachedSlotIds == null) {
+            cachedSlotIds = new RoaringBitmap();
+            getTupleIds().stream().map(descTbl::getTupleDesc)
+                    .flatMap(tupleDesc -> tupleDesc.getSlots().stream().map(SlotDescriptor::getId))
+                    .map(SlotId::asInt).forEach(cachedSlotIds::add);
+        }
+        return cachedSlotIds;
     }
 
     protected boolean couldBound(Expr probeExpr, RuntimeFilterDescription rfDesc, DescriptorTable descTbl) {
@@ -841,19 +867,38 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
             SlotRef slotRef = (SlotRef) probeExpr;
             for (TupleId tupleId : getTupleIds()) {
                 for (SlotDescriptor slot : descTbl.getTupleDesc(tupleId).getSlots()) {
-                    // TopN Filter only works in no-nullable column
-                    if (slot.getId().equals(slotRef.getSlotId()) && !slotRef.isNullable()) {
+                    if (!slot.getId().equals(slotRef.getSlotId())) {
+                        continue;
+                    }
+                    if (!slotRef.isNullable() || rfDesc.isNullLast()) {
+                        return true;
+                    }
+                    if (slotRef.isNullable() && canEliminateNull(slot)) {
                         return true;
                     }
                 }
             }
             return false;
         } else {
-            return probeExpr.isBoundByTupleIds(getTupleIds());
+            return getSlotIds(descTbl).contains(probeExpr.getUsedSlotIds());
         }
     }
 
-    private boolean tryPushdownRuntimeFilterToChild(DescriptorTable descTbl, RuntimeFilterDescription description,
+    protected boolean canEliminateNull(Expr expr, SlotDescriptor slot) {
+        if (expr.isBound(slot.getId())) {
+            ScalarOperator operator = SqlToScalarOperatorTranslator.translate(expr);
+            ColumnRefOperator column = new ColumnRefOperator(slot.getId().asInt(), slot.getType(),
+                    "any", true);
+            return Utils.canEliminateNull(Sets.newHashSet(column), operator);
+        }
+        return false;
+    }
+
+    protected boolean canEliminateNull(SlotDescriptor slot) {
+        return conjuncts.stream().anyMatch(expr -> canEliminateNull(expr, slot));
+    }
+
+    private boolean tryPushdownRuntimeFilterToChild(RuntimeFilterPushDownContext context,
                                                     Optional<List<Expr>> optProbeExprCandidates,
                                                     Optional<List<List<Expr>>> optPartitionByExprsCandidates,
                                                     int childIdx) {
@@ -865,14 +910,14 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
 
         for (Expr candidateOfProbeExpr : probeExprCandidates) {
             if (partitionByExprsCandidates.isEmpty()) {
-                if (children.get(childIdx).pushDownRuntimeFilters(descTbl, description, candidateOfProbeExpr,
+                if (children.get(childIdx).pushDownRuntimeFilters(context, candidateOfProbeExpr,
                         Lists.newArrayList())) {
                     return true;
                 }
             } else {
                 for (List<Expr> candidateOfPartitionByExprs : partitionByExprsCandidates) {
                     if (children.get(childIdx)
-                            .pushDownRuntimeFilters(descTbl, description, candidateOfProbeExpr,
+                            .pushDownRuntimeFilters(context, candidateOfProbeExpr,
                                     candidateOfPartitionByExprs)) {
                         return true;
                     }
@@ -886,24 +931,27 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
      * Push down a runtime filter for the specific child with childIdx. `addProbeInfo` indicates whether
      * add runtime filter info into this PlanNode.
      */
-    protected boolean pushdownRuntimeFilterForChildOrAccept(DescriptorTable descTbl,
-                                                            RuntimeFilterDescription description,
+    protected boolean pushdownRuntimeFilterForChildOrAccept(RuntimeFilterPushDownContext context,
                                                             Expr probeExpr,
                                                             Optional<List<Expr>> optProbeExprCandidates,
                                                             List<Expr> partitionByExprs,
                                                             Optional<List<List<Expr>>> optPartitionByExprsCandidates,
                                                             int childIdx,
                                                             boolean addProbeInfo) {
-        boolean accept = tryPushdownRuntimeFilterToChild(descTbl, description, optProbeExprCandidates,
+        RuntimeFilterDescription description = context.getDescription();
+        DescriptorTable descTbl = context.getDescTbl();
+        boolean accept = tryPushdownRuntimeFilterToChild(context, optProbeExprCandidates,
                 optPartitionByExprsCandidates, childIdx);
-        boolean isBound = probeExpr.isBoundByTupleIds(getTupleIds());
+        RoaringBitmap slotIds = getSlotIds(descTbl);
+        boolean isBound = slotIds.contains(probeExpr.getUsedSlotIds()) &&
+                partitionByExprs.stream().allMatch(expr -> slotIds.contains(expr.getUsedSlotIds()));
         if (isBound) {
             checkRuntimeFilterOnNullValue(description, probeExpr);
         }
         if (accept) {
             return true;
         }
-        if (addProbeInfo && description.canProbeUse(this)) {
+        if (isBound && addProbeInfo && description.canProbeUse(this, context)) {
             // can not push down to children.
             // use runtime filter at this level.
             description.addProbeExpr(id.asInt(), probeExpr);

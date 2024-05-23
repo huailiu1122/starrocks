@@ -12,42 +12,54 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.connector.delta;
 
 import com.starrocks.connector.HdfsEnvironment;
 import com.starrocks.connector.MetastoreType;
 import com.starrocks.connector.hive.CachingHiveMetastore;
 import com.starrocks.connector.hive.CachingHiveMetastoreConf;
-import com.starrocks.connector.hive.HiveMetastoreOperations;
 import com.starrocks.connector.hive.IHiveMetastore;
+import com.starrocks.connector.metastore.IMetastore;
 import org.apache.hadoop.hive.metastore.conf.MetastoreConf;
 
+import java.util.Map;
+
+import static com.starrocks.connector.delta.DeltaLakeConnector.HIVE_METASTORE_URIS;
 import static com.starrocks.connector.hive.CachingHiveMetastore.createQueryLevelInstance;
 
 public class DeltaLakeMetadataFactory {
     private final String catalogName;
-    private final IHiveMetastore metastore;
-    private final long perQueryMetastoreMaxNum;
+    protected final IMetastore metastore;
+    protected final long perQueryMetastoreMaxNum;
     private final HdfsEnvironment hdfsEnvironment;
-    private final MetastoreType metastoreType;
+    protected final MetastoreType metastoreType;
 
-    public DeltaLakeMetadataFactory(String catalogName, IHiveMetastore metastore, CachingHiveMetastoreConf hmsConf,
-                                    String uri, HdfsEnvironment hdfsEnvironment, MetastoreType metastoreType) {
+    public DeltaLakeMetadataFactory(String catalogName, IMetastore metastore, CachingHiveMetastoreConf hmsConf,
+                                    Map<String, String> properties, HdfsEnvironment hdfsEnvironment,
+                                    MetastoreType metastoreType) {
         this.catalogName = catalogName;
         this.metastore = metastore;
         this.perQueryMetastoreMaxNum = hmsConf.getPerQueryCacheMaxNum();
         this.hdfsEnvironment = hdfsEnvironment;
-        this.hdfsEnvironment.getConfiguration().set(MetastoreConf.ConfVars.THRIFT_URIS.getHiveName(), uri);
+        if (properties.containsKey(HIVE_METASTORE_URIS)) {
+            this.hdfsEnvironment.getConfiguration().set(MetastoreConf.ConfVars.THRIFT_URIS.getHiveName(),
+                    properties.get(HIVE_METASTORE_URIS));
+        }
         this.metastoreType = metastoreType;
     }
 
-    public DeltaLakeMetadata create() {
-        HiveMetastoreOperations hiveMetastoreOperations = new HiveMetastoreOperations(
-                createQueryLevelInstance(metastore, perQueryMetastoreMaxNum),
-                metastore instanceof CachingHiveMetastore,
-                hdfsEnvironment.getConfiguration(), metastoreType, catalogName);
+    protected IMetastore createQueryLevelCacheMetastore() {
+        return createQueryLevelInstance((IHiveMetastore) metastore, perQueryMetastoreMaxNum);
+    }
 
-        return new DeltaLakeMetadata(hdfsEnvironment.getConfiguration(), catalogName, hiveMetastoreOperations);
+    public DeltaLakeMetadata create() {
+        IMetastore queryLevelCacheMetastore = createQueryLevelCacheMetastore();
+        boolean enableCatalogLevelCache = metastore instanceof CachingHiveMetastore;
+
+        DeltaMetastoreOperations metastoreOperations = new DeltaMetastoreOperations(catalogName, queryLevelCacheMetastore,
+                enableCatalogLevelCache,
+                hdfsEnvironment.getConfiguration(), metastoreType);
+
+        return new DeltaLakeMetadata(hdfsEnvironment, catalogName, metastoreOperations);
     }
 }

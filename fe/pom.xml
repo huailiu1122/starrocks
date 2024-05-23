@@ -29,9 +29,11 @@ under the License.
     <packaging>pom</packaging>
 
     <modules>
+        <module>plugin-common</module>
         <module>fe-common</module>
         <module>spark-dpp</module>
         <module>fe-core</module>
+        <module>hive-udf</module>
     </modules>
 
     <name>starrocks-fe</name>
@@ -39,22 +41,25 @@ under the License.
     <properties>
         <starrocks.home>${basedir}/../</starrocks.home>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
         <jprotobuf.version>2.4.12</jprotobuf.version>
         <log4j.version>2.19.0</log4j.version>
-        <jackson.version>2.13.4</jackson.version>
-        <spark.version>3.4.0</spark.version>
+        <jackson.version>2.15.2</jackson.version>
+        <spark.version>3.4.1</spark.version>
         <tomcat.version>8.5.70</tomcat.version>
         <parquet.version>1.10.1</parquet.version>
-        <hadoop.version>3.3.6</hadoop.version>
+        <hadoop.version>3.4.0</hadoop.version>
         <gcs.connector.version>hadoop3-2.2.11</gcs.connector.version>
         <skip.plugin>false</skip.plugin>
-        <hudi.version>0.12.2</hudi.version>
+        <hudi.version>0.14.1</hudi.version>
         <hive-apache.version>3.1.2-13</hive-apache.version>
         <dlf-metastore-client.version>0.2.14</dlf-metastore-client.version>
         <sonar.organization>starrocks</sonar.organization>
         <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+        <odps.version>0.45.5-public</odps.version>
+        <hikaricp.version>3.4.5</hikaricp.version>
+        <kafka-clients.version>3.4.0</kafka-clients.version>
     </properties>
 
     <profiles>
@@ -151,6 +156,19 @@ under the License.
 
     <dependencyManagement>
         <dependencies>
+
+            <dependency>
+                <groupId>com.starrocks</groupId>
+                <artifactId>plugin-common</artifactId>
+                <version>1.0.0</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.starrocks</groupId>
+                <artifactId>hive-udf</artifactId>
+                <version>1.0.0</version>
+            </dependency>
+
             <dependency>
                 <groupId>com.starrocks</groupId>
                 <artifactId>fe-common</artifactId>
@@ -198,11 +216,18 @@ under the License.
                 <version>2.3</version>
             </dependency>
 
-            <!-- https://mvnrepository.com/artifact/commons-net/commons-net -->
+            <!-- https://mvnrepository.com/artifact/org.apache.kudu/kudu-client -->
             <dependency>
-                <groupId>commons-net</groupId>
-                <artifactId>commons-net</artifactId>
-                <version>3.9.0</version>
+                <groupId>org.apache.kudu</groupId>
+                <artifactId>kudu-client</artifactId>
+                <version>1.16.0</version>
+            </dependency>
+
+            <!-- https://mvnrepository.com/artifact/com.github.seancfoley/ipaddress -->
+            <dependency>
+                <groupId>com.github.seancfoley</groupId>
+                <artifactId>ipaddress</artifactId>
+                <version>5.4.2</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/commons-validator/commons-validator -->
@@ -250,7 +275,7 @@ under the License.
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
-                <version>${jackson.version}.2</version>
+                <version>${jackson.version}</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/com.fasterxml.jackson.dataformat/jackson-dataformat-yaml -->
@@ -278,7 +303,7 @@ under the License.
             <dependency>
                 <groupId>com.starrocks</groupId>
                 <artifactId>starrocks-bdb-je</artifactId>
-                <version>18.3.16</version>
+                <version>18.3.18</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/de.jflex/jflex -->
@@ -335,7 +360,7 @@ under the License.
             <dependency>
                 <groupId>org.json</groupId>
                 <artifactId>json</artifactId>
-                <version>20230227</version>
+                <version>20231013</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/junit/junit -->
@@ -399,7 +424,7 @@ under the License.
             <dependency>
                 <groupId>com.squareup.okhttp3</groupId>
                 <artifactId>okhttp</artifactId>
-                <version>4.9.1</version>
+                <version>4.10.0</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/com.squareup.okio/okio -->
@@ -430,11 +455,17 @@ under the License.
                 <version>6.2.1</version>
             </dependency>
 
+            <dependency>
+                <groupId>org.apache.kafka</groupId>
+                <artifactId>kafka-clients</artifactId>
+                <version>${kafka-clients.version}</version>
+            </dependency>
+
             <!-- https://mvnrepository.com/artifact/org.jboss.xnio/xnio-nio -->
             <dependency>
                 <groupId>org.jboss.xnio</groupId>
                 <artifactId>xnio-nio</artifactId>
-                <version>3.7.9.Final</version>
+                <version>3.8.10.Final</version>
             </dependency>
 
             <!-- support jdk9 -->
@@ -614,11 +645,37 @@ under the License.
                 </exclusions>
             </dependency>
 
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-client-api</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-client-runtime</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+
             <!-- https://mvnrepository.com/artifact/org.apache.hadoop/hadoop-aws -->
             <dependency>
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-aws</artifactId>
                 <version>${hadoop.version}</version>
+            </dependency>
+
+            <!-- https://mvnrepository.com/artifact/com.qcloud.cos/hadoop-cos -->
+            <dependency>
+                <groupId>com.qcloud.cos</groupId>
+                <artifactId>hadoop-cos</artifactId>
+                <version>3.3.0-8.3.2</version>
+            </dependency>
+
+            <!-- https://mvnrepository.com/artifact/com.qcloud/chdfs_hadoop_plugin_network -->
+            <dependency>
+                <groupId>com.qcloud</groupId>
+                <artifactId>chdfs_hadoop_plugin_network</artifactId>
+                <version>3.2</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/org.apache.hadoop/hadoop-azure-datalake -->
@@ -655,6 +712,12 @@ under the License.
                 <groupId>org.apache.hudi</groupId>
                 <artifactId>hudi-common</artifactId>
                 <version>${hudi.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.apache.zookeeper</groupId>
+                        <artifactId>zookeeper</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/org.apache.hudi/hudi-hadoop-mr -->
@@ -672,18 +735,40 @@ under the License.
                 <scope>import</scope>
             </dependency>
 
-            <!-- https://mvnrepository.com/artifact/mysql/mysql-connector-java -->
+            <!-- https://mvnrepository.com/artifact/org.mariadb.jdbc/mariadb-java-client -->
             <dependency>
-                <groupId>mysql</groupId>
-                <artifactId>mysql-connector-java</artifactId>
-                <version>8.0.28</version>
+                <groupId>org.mariadb.jdbc</groupId>
+                <artifactId>mariadb-java-client</artifactId>
+                <version>3.3.2</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/org.postgresql/postgresql -->
             <dependency>
                 <groupId>org.postgresql</groupId>
                 <artifactId>postgresql</artifactId>
-                <version>42.4.3</version>
+                <version>42.4.4</version>
+            </dependency>
+
+            <!-- https://mvnrepository.com/artifact/com.clickhouse/clickhouse-jdbc -->
+            <!-- we need clickhouse driver for jdbc connector -->
+            <dependency>
+                <groupId>com.clickhouse</groupId>
+                <artifactId>clickhouse-jdbc</artifactId>
+                <version>0.4.6</version>
+            </dependency>
+			
+			<!-- https://mvnrepository.com/artifact/com.oracle.database.jdbc/ojdbc10 -->
+            <dependency>
+                <groupId>com.oracle.database.jdbc</groupId>
+                <artifactId>ojdbc10</artifactId>
+                <version>19.18.0.0</version>
+            </dependency>
+
+            <!-- https://mvnrepository.com/artifact/com.oracle.database.nls/orai18n -->
+            <dependency>
+                <groupId>com.oracle.database.nls</groupId>
+                <artifactId>orai18n</artifactId>
+                <version>19.18.0.0</version>
             </dependency>
 
             <!-- https://mvnrepository.com/artifact/com.mockrunner/mockrunner-jdbc -->
@@ -712,6 +797,18 @@ under the License.
                 <groupId>io.airlift</groupId>
                 <artifactId>concurrent</artifactId>
                 <version>202</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.aliyun.odps</groupId>
+                <artifactId>odps-sdk-core</artifactId>
+                <version>${odps.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.aliyun.odps</groupId>
+                <artifactId>odps-sdk-table-api</artifactId>
+                <version>${odps.version}</version>
             </dependency>
 
         </dependencies>

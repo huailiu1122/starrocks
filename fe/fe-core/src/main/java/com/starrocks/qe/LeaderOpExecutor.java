@@ -38,7 +38,10 @@ import com.google.common.base.Preconditions;
 import com.starrocks.analysis.RedirectStatus;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.ErrorCode;
+import com.starrocks.common.ErrorReportException;
 import com.starrocks.common.Pair;
+import com.starrocks.common.util.AuditStatisticsUtil;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.mysql.MysqlChannel;
 import com.starrocks.qe.QueryState.MysqlStateType;
@@ -50,6 +53,7 @@ import com.starrocks.sql.ast.SetStmt;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.SystemVariable;
 import com.starrocks.system.SystemInfoService;
+import com.starrocks.thrift.TAuditStatistics;
 import com.starrocks.thrift.TMasterOpRequest;
 import com.starrocks.thrift.TMasterOpResult;
 import com.starrocks.thrift.TNetworkAddress;
@@ -64,6 +68,7 @@ import java.util.ArrayList;
 
 public class LeaderOpExecutor {
     private static final Logger LOG = LogManager.getLogger(LeaderOpExecutor.class);
+    public static final int MAX_FORWARD_TIMES = 30;
 
     private final OriginStatement originStmt;
     private StatementBase parsedStmt;
@@ -110,6 +115,16 @@ public class LeaderOpExecutor {
                 }
             }
         }
+
+        if (result.isSetResource_group_name()) {
+            ctx.getAuditEventBuilder().setResourceGroup(result.getResource_group_name());
+        }
+        if (result.isSetAudit_statistics()) {
+            TAuditStatistics tAuditStatistics = result.getAudit_statistics();
+            if (ctx.getExecutor() != null) {
+                ctx.getExecutor().setQueryStatistics(AuditStatisticsUtil.toProtobuf(tAuditStatistics));
+            }
+        }
     }
 
     private void afterForward() throws DdlException {
@@ -139,7 +154,16 @@ public class LeaderOpExecutor {
 
     // Send request to Leader
     private void forward() throws Exception {
-        Pair<String, Integer> ipAndPort = GlobalStateMgr.getCurrentState().getLeaderIpAndRpcPort();
+        int forwardTimes = ctx.getForwardTimes() + 1;
+        if (forwardTimes > 1) {
+            LOG.info("forward multi times: {}", forwardTimes);
+        }
+        if (forwardTimes > MAX_FORWARD_TIMES) {
+            LOG.warn("too many forward times, max allowed forward time is {}", MAX_FORWARD_TIMES);
+            ErrorReportException.report(ErrorCode.ERR_FORWARD_TOO_MANY_TIMES, forwardTimes);
+        }
+
+        Pair<String, Integer> ipAndPort = GlobalStateMgr.getCurrentState().getNodeMgr().getLeaderIpAndRpcPort();
         TNetworkAddress thriftAddress = new TNetworkAddress(ipAndPort.first, ipAndPort.second);
         TMasterOpRequest params = new TMasterOpRequest();
         params.setCluster(SystemInfoService.DEFAULT_CLUSTER);
@@ -154,6 +178,8 @@ public class LeaderOpExecutor {
         params.setStmt_id(ctx.getStmtId());
         params.setEnableStrictMode(ctx.getSessionVariable().getEnableInsertStrict());
         params.setCurrent_user_ident(ctx.getCurrentUserIdentity().toThrift());
+        params.setForward_times(forwardTimes);
+        params.setSession_id(ctx.getSessionId().toString());
 
         TUserRoles currentRoles = new TUserRoles();
         Preconditions.checkState(ctx.getCurrentRoleIds() != null);
@@ -180,6 +206,10 @@ public class LeaderOpExecutor {
                 thriftTimeoutMs,
                 Config.thrift_rpc_retry_times,
                 client -> client.forward(params));
+    }
+
+    public TMasterOpResult getResult() {
+        return result;
     }
 
     public ByteBuffer getOutputPacket() {

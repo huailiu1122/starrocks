@@ -12,36 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.connector.hive;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Table;
+import com.starrocks.connector.metastore.IMetastore;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 
-public interface IHiveMetastore {
-
-    List<String> getAllDatabaseNames();
+public interface IHiveMetastore extends IMetastore {
 
     void createDb(String dbName, Map<String, String> properties);
 
     void dropDb(String dbName, boolean deleteData);
 
-    Database getDb(String dbName);
-
-    List<String> getAllTableNames(String dbName);
-
     void createTable(String dbName, Table table);
 
     void dropTable(String dbName, String tableName);
 
-    Table getTable(String dbName, String tableName);
+    default List<String> getPartitionKeys(String dbName, String tableName) {
+        return getPartitionKeysByValue(dbName, tableName, HivePartitionValue.ALL_PARTITION_VALUES);
+    }
 
     List<String> getPartitionKeysByValue(String dbName, String tableName, List<Optional<String>> partitionValues);
 
@@ -57,11 +52,9 @@ public interface IHiveMetastore {
 
     void addPartitions(String dbName, String tableName, List<HivePartitionWithStats> partitions);
 
-    void alterPartition(HivePartitionWithStats partition);
-
     void dropPartition(String dbName, String tableName, List<String> partValues, boolean deleteData);
 
-    boolean partitionExists(String dbName, String tableName, List<String> partitionValues);
+    boolean partitionExists(Table table, List<String> partitionValues);
 
     Map<String, Partition> getPartitionsByNames(String dbName, String tableName, List<String> partitionNames);
 
@@ -77,6 +70,10 @@ public interface IHiveMetastore {
     // return refreshed partitions in cache for partitioned table, return empty list for unpartitioned table
     default List<HivePartitionName> refreshTable(String hiveDbName, String hiveTblName, boolean onlyCachedPartitions) {
         return Lists.newArrayList();
+    }
+
+    default boolean refreshView(String hiveDbName, String hiveTblName) {
+        return true;
     }
 
     default List<HivePartitionName> refreshTableBackground(String hiveDbName, String hiveTblName, boolean onlyCachedPartitions) {

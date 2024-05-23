@@ -19,6 +19,8 @@ import com.starrocks.qe.GlobalVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TUniqueId;
 import org.apache.commons.compress.utils.Lists;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -33,6 +35,8 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
 public class SlotRequestQueue {
+    private static final Logger LOG = LogManager.getLogger(SlotRequestQueue.class);
+
     private final Map<TUniqueId, LogicalSlot> slots = new HashMap<>();
     private final Set<LogicalSlot> slotsOrderByExpiredTime = new TreeSet<>(
             Comparator.comparingLong(LogicalSlot::getExpiredPendingTimeMs).thenComparing(LogicalSlot::getSlotId));
@@ -121,13 +125,13 @@ public class SlotRequestQueue {
 
             ResourceGroup group = GlobalStateMgr.getCurrentState().getResourceGroupMgr().getResourceGroup(groupId);
             int numAllocatedSlotsOfGroup = allocatedSlots.getNumSlotsOfGroup(groupId);
-            int numSlotsToAllocateOfGroup = peakSlotsToAllocateFromSubQueue(
+            int numSlotsToAllocate = peakSlotsToAllocateFromSubQueue(
                     subQueue, group, numAllocatedSlots, numAllocatedSlotsOfGroup, slotsToAllocate);
-            numAllocatedSlots += numSlotsToAllocateOfGroup;
+            numAllocatedSlots += numSlotsToAllocate;
 
             // If the group of the current index peaks slots to allocate, update nextGroupIndex to make the next turn starts
             // from the next group index.
-            if (numSlotsToAllocateOfGroup > 0) {
+            if (numSlotsToAllocate > 0) {
                 nextGroupIndex = localNextGroupIndex;
             }
         }
@@ -142,6 +146,10 @@ public class SlotRequestQueue {
 
     private boolean isGroupSlotAvailable(ResourceGroup group, int numAllocatedSlotsOfGroup) {
         if (group == null) {
+            return true;
+        }
+
+        if (!GlobalVariable.isEnableGroupLevelQueryQueue()) {
             return true;
         }
 

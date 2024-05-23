@@ -15,7 +15,7 @@
 package com.starrocks.sql.analyzer;
 
 import com.starrocks.common.AnalysisException;
-import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.common.DdlException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DDLStmtExecutor;
 import com.starrocks.sql.ast.DropDbStmt;
@@ -25,6 +25,7 @@ import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import static com.starrocks.sql.analyzer.AnalyzeTestUtil.analyzeFail;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.analyzeSuccess;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.getStarRocksAssert;
 
@@ -68,8 +69,14 @@ public class AnalyzeDropDbTest {
             DDLStmtExecutor.execute(dropDbStmt, connectContext);
             Assert.fail();
         } catch (Exception e) {
-            Assert.assertTrue(e instanceof StarRocksConnectorException);
-            Assert.assertTrue(e.getMessage().contains("This connector doesn't support dropping databases"));
+            Assert.assertTrue(e instanceof DdlException);
+            Assert.assertTrue(e.getMessage().contains("Can't drop database"));
         }
+    }
+
+    @Test
+    public void testDropSystem() throws Exception {
+        analyzeFail("DROP database `information_schema`", "Access denied;");
+        analyzeFail("DROP Database `sys`", "Access denied;");
     }
 }

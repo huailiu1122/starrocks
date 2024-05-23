@@ -134,7 +134,7 @@ public class LakeTableTest {
         Assert.assertTrue(newTable.isCloudNativeTable());
         LakeTable newLakeTable = (LakeTable) newTable;
 
-        Assert.assertEquals("s3://test-bucket/1/", newLakeTable.getStoragePath());
+        Assert.assertEquals("s3://test-bucket/1/", newLakeTable.getDefaultFilePathInfo().getFullPath());
 
         Partition p1 = newLakeTable.getPartition(partitionId);
         MaterializedIndex newIndex = p1.getBaseIndex();
@@ -151,7 +151,12 @@ public class LakeTableTest {
         Assert.assertEquals(-1, newLakeTable.lastVersionUpdateStartTime.longValue());
         Assert.assertEquals(0, newLakeTable.lastVersionUpdateEndTime.longValue());
 
-        Assert.assertNull(table.delete(true));
-        Assert.assertNotNull(table.delete(false));
+        Assert.assertTrue(newLakeTable.delete(dbId, false));
+    }
+
+    @Test
+    public void testDeserialize() {
+        LakeTable lakeTable = new LakeTable();
+        Assert.assertNotNull(lakeTable.getIndexIdToMeta());
     }
 }

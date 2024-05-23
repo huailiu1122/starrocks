@@ -35,6 +35,7 @@
 #pragma once
 
 #include <thrift/TApplicationException.h>
+#include <thrift/TBase.h>
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/protocol/TDebugProtocol.h>
 #include <thrift/protocol/TJSONProtocol.h>
@@ -64,7 +65,7 @@ public:
 
     // Serializes obj into result.  Result will contain a copy of the memory.
     template <class T>
-    Status serialize(T* obj, std::vector<uint8_t>* result) {
+    [[nodiscard]] Status serialize(T* obj, std::vector<uint8_t>* result) {
         uint32_t len = 0;
         uint8_t* buffer = nullptr;
         RETURN_IF_ERROR(serialize<T>(obj, &len, &buffer));
@@ -77,7 +78,7 @@ public:
     // memory returned is owned by this object and will be invalid when another object
     // is serialized.
     template <class T>
-    Status serialize(T* obj, uint32_t* len, uint8_t** buffer) {
+    [[nodiscard]] Status serialize(T* obj, uint32_t* len, uint8_t** buffer) {
         try {
             _mem_buffer->resetBuffer();
             obj->write(_protocol.get());
@@ -92,7 +93,7 @@ public:
     }
 
     template <class T>
-    Status serialize(T* obj, std::string* result) {
+    [[nodiscard]] Status serialize(T* obj, std::string* result) {
         try {
             _mem_buffer->resetBuffer();
             obj->write(_protocol.get());
@@ -107,7 +108,7 @@ public:
     }
 
     template <class T>
-    Status serialize(T* obj) {
+    [[nodiscard]] Status serialize(T* obj) {
         try {
             _mem_buffer->resetBuffer();
             obj->write(_protocol.get());
@@ -144,7 +145,8 @@ std::shared_ptr<apache::thrift::protocol::TProtocol> create_deserialize_protocol
 // all the bytes needed to store the thrift message.  On return, len will be
 // set to the actual length of the header.
 template <class T>
-Status deserialize_thrift_msg(const uint8_t* buf, uint32_t* len, TProtocolType type, T* deserialized_msg) {
+[[nodiscard]] Status deserialize_thrift_msg(const uint8_t* buf, uint32_t* len, TProtocolType type,
+                                            T* deserialized_msg) {
     // Deserialize msg bytes into c++ thrift msg using memory
     // transport. TMemoryBuffer is not const-safe, although we use it in
     // a const-safe way, so we have to explicitly cast away the const.
@@ -169,7 +171,8 @@ Status deserialize_thrift_msg(const uint8_t* buf, uint32_t* len, TProtocolType t
 }
 
 template <class T>
-Status deserialize_thrift_msg(const uint8_t* buf, uint32_t* len, const std::string& protocol, T* deserialized_msg) {
+[[nodiscard]] Status deserialize_thrift_msg(const uint8_t* buf, uint32_t* len, const std::string& protocol,
+                                            T* deserialized_msg) {
     if (protocol == "json") {
         return deserialize_thrift_msg<T>(buf, len, TProtocolType::JSON, deserialized_msg);
     } else if (protocol == "compact") {
@@ -184,10 +187,10 @@ void init_thrift_logging();
 
 // Wait for a server that is running locally to start accepting
 // connections, up to a maximum timeout
-Status wait_for_local_server(const ThriftServer& server, int num_retries, int retry_interval_ms);
+[[nodiscard]] Status wait_for_local_server(const ThriftServer& server, int num_retries, int retry_interval_ms);
 
 // Wait for a server to start accepting connections, up to a maximum timeout
-Status wait_for_server(const std::string& host, int port, int num_retries, int retry_interval_ms);
+[[nodiscard]] Status wait_for_server(const std::string& host, int port, int num_retries, int retry_interval_ms);
 
 // Utility method to print address as address:port
 void t_network_address_to_string(const TNetworkAddress& address, std::string* out);
@@ -196,16 +199,7 @@ void t_network_address_to_string(const TNetworkAddress& address, std::string* ou
 // string representation
 bool t_network_address_comparator(const TNetworkAddress& a, const TNetworkAddress& b);
 
-template <typename ThriftStruct>
-ThriftStruct from_json_string(const std::string& json_val) {
-    using namespace apache::thrift::transport;
-    using namespace apache::thrift::protocol;
-    ThriftStruct ts;
-    auto* buffer = new TMemoryBuffer((uint8_t*)json_val.c_str(), (uint32_t)json_val.size());
-    std::shared_ptr<TTransport> trans(buffer);
-    TJSONProtocol protocol(trans);
-    ts.read(&protocol);
-    return ts;
-}
+void thrift_from_json_string(::apache::thrift::TBase* base, const std::string& json_val);
+std::string thrift_to_json_string(const ::apache::thrift::TBase* base);
 
 } // namespace starrocks

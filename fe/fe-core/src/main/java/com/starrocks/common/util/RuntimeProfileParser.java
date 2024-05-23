@@ -17,6 +17,8 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.thrift.TUnit;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -30,6 +32,9 @@ import java.util.regex.Pattern;
  * This class is used for reconstruct RuntimeProfile from plain text
  */
 public class RuntimeProfileParser {
+    private static final Logger LOG = LogManager.getLogger(RuntimeProfileParser.class);
+    private static final Pattern NONE_COUNTER_PATTERN =
+            Pattern.compile("^- (.*?): $");
     private static final Pattern BYTE_COUNTER_PATTERN =
             Pattern.compile("^- (.*?): (-?\\d+\\.\\d+) (KB|MB|GB|TB|B)$");
     private static final Pattern BYTE_PER_SEC_COUNTER_PATTERN =
@@ -48,6 +53,7 @@ public class RuntimeProfileParser {
             Pattern.compile("^- (.*?)$");
 
     public static RuntimeProfile parseFrom(String content) {
+        LOG.debug("Parse runtime profile from content: {}", content);
         BufferedReader bufferedReader = new BufferedReader(new StringReader(content));
         // (profile, profileIndent, counterStack(name, counter, counterIndent))
         LinkedList<ProfileTuple> profileStack = Lists.newLinkedList();
@@ -107,6 +113,7 @@ public class RuntimeProfileParser {
                 }
             }
         } catch (IOException e) {
+            LOG.error("Failed to parse runtime profile from content: {}, {}", content, DebugUtil.getStackTrace(e));
             return null;
         }
 
@@ -146,7 +153,11 @@ public class RuntimeProfileParser {
         if (counterTuple != null) {
             return counterTuple;
         }
-        return tryParseTimer(item);
+        counterTuple = tryParseTimer(item);
+        if (counterTuple != null) {
+            return counterTuple;
+        }
+        return tryParseNone(item);
     }
 
     private static InfoStringTuple tryParseInfoString(String item) {
@@ -299,6 +310,15 @@ public class RuntimeProfileParser {
         }
 
         return new CounterTuple(name, TUnit.TIME_NS, total.longValue());
+    }
+
+    private static CounterTuple tryParseNone(String item) {
+        Matcher matcher = NONE_COUNTER_PATTERN.matcher(item);
+        if (!matcher.matches()) {
+            return null;
+        }
+        String name = matcher.group(1);
+        return new CounterTuple(name, TUnit.NONE, 0);
     }
 
     private static final class ProfileTuple {

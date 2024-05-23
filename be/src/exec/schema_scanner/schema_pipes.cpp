@@ -17,8 +17,10 @@
 #include "exec/schema_scanner.h"
 #include "exec/schema_scanner/schema_helper.h"
 #include "gen_cpp/FrontendService_types.h"
+#include "runtime/datetime_value.h"
 #include "runtime/runtime_state.h"
 #include "runtime/string_value.h"
+#include "types/date_value.h"
 #include "types/logical_type.h"
 
 namespace starrocks {
@@ -27,13 +29,20 @@ SchemaScanner::ColumnDesc SchemaTablePipes::_s_columns[] = {
         {"DATABASE_NAME", TYPE_VARCHAR, sizeof(StringValue), false},
         {"PIPE_ID", TYPE_BIGINT, sizeof(int64_t), false},
         {"PIPE_NAME", TYPE_VARCHAR, sizeof(StringValue), false},
+        {"PROPERTIES", TYPE_VARCHAR, sizeof(StringValue), false},
         {"STATE", TYPE_VARCHAR, sizeof(StringValue), false},
+        {"TABLE_NAME", TYPE_VARCHAR, sizeof(StringValue), false},
+        {"LOAD_STATUS", TYPE_VARCHAR, sizeof(StringValue), false},
+        {"LAST_ERROR", TYPE_VARCHAR, sizeof(StringValue), false},
+        {"CREATED_TIME", TYPE_DATETIME, sizeof(DateTimeValue), false},
 };
 
 SchemaTablePipes::SchemaTablePipes()
         : SchemaScanner(_s_columns, sizeof(_s_columns) / sizeof(SchemaScanner::ColumnDesc)) {}
 
 Status SchemaTablePipes::start(RuntimeState* state) {
+    // init schema scanner state
+    RETURN_IF_ERROR(SchemaScanner::init_schema_scanner_state(state));
     return SchemaScanner::start(state);
 }
 
@@ -44,7 +53,7 @@ Status SchemaTablePipes::_list_pipes() {
     if (_param->current_user_ident) {
         params.__set_user_ident(*_param->current_user_ident);
     }
-    return SchemaHelper::list_pipes(*(_param->ip), _param->port, params, &_pipes_result);
+    return SchemaHelper::list_pipes(_ss_state, params, &_pipes_result);
 }
 
 Status SchemaTablePipes::get_next(ChunkPtr* chunk, bool* eos) {
@@ -68,7 +77,12 @@ DatumArray SchemaTablePipes::_build_row() {
             Slice(pipe.database_name),
             pipe.pipe_id,
             Slice(pipe.pipe_name),
+            Slice(pipe.properties),
             Slice(pipe.state),
+            Slice(pipe.table_name),
+            Slice(pipe.load_status),
+            Slice(pipe.last_error),
+            TimestampValue::create_from_unixtime(pipe.created_time, _runtime_state->timezone_obj()),
     };
 }
 

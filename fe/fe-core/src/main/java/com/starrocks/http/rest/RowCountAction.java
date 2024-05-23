@@ -45,10 +45,13 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Table.TableType;
 import com.starrocks.catalog.Tablet;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.util.concurrent.lock.LockType;
+import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
+import com.starrocks.privilege.AccessDeniedException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.UserIdentity;
@@ -71,7 +74,7 @@ public class RowCountAction extends RestBaseAction {
     }
 
     @Override
-    protected void executeWithoutPassword(BaseRequest request, BaseResponse response) throws DdlException {
+    protected void executeWithoutPassword(BaseRequest request, BaseResponse response) throws DdlException, AccessDeniedException {
         UserIdentity currentUser = ConnectContext.get().getCurrentUserIdentity();
         checkUserOwnsAdminRole(currentUser);
 
@@ -91,7 +94,8 @@ public class RowCountAction extends RestBaseAction {
         if (db == null) {
             throw new DdlException("Database[" + dbName + "] does not exist");
         }
-        db.writeLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.WRITE);
         try {
             Table table = db.getTable(tableName);
             if (table == null) {
@@ -116,7 +120,7 @@ public class RowCountAction extends RestBaseAction {
                 } // end for indices
             } // end for partitions            
         } finally {
-            db.writeUnlock();
+            locker.unLockDatabase(db, LockType.WRITE);
         }
 
         // to json response

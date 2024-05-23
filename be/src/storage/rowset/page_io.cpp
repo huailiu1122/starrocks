@@ -150,7 +150,8 @@ Status PageIO::read_and_decompress_page(const PageReadOptions& opts, PageHandle*
         std::string footer_buf(page_slice.data + page_slice.size - 4 - footer_size, footer_size);
         if (!footer->ParseFromString(footer_buf)) {
             return Status::Corruption(
-                    strings::Substitute("Bad page: invalid footer, file=$0", opts.read_file->filename()));
+                    strings::Substitute("Bad page: invalid footer, read from page cache, file=$0, footer_size=$1",
+                                        opts.read_file->filename(), footer_size));
         }
         *body = Slice(page_slice.data, page_slice.size - 4 - footer_size);
         return Status::OK();
@@ -169,6 +170,7 @@ Status PageIO::read_and_decompress_page(const PageReadOptions& opts, PageHandle*
     Slice page_slice(page.get(), page_size);
     {
         SCOPED_RAW_TIMER(&opts.stats->io_ns);
+        // todo override is_cache_hit
         if (opts.read_file->is_cache_hit()) {
             RETURN_IF_ERROR(opts.read_file->read_at_fully(opts.page_pointer.offset, page_slice.data, page_slice.size));
             ++opts.stats->pages_from_local_disk;
@@ -194,7 +196,9 @@ Status PageIO::read_and_decompress_page(const PageReadOptions& opts, PageHandle*
     // parse and set footer
     uint32_t footer_size = decode_fixed32_le((uint8_t*)page_slice.data + page_slice.size - 4);
     if (!footer->ParseFromArray(page_slice.data + page_slice.size - 4 - footer_size, footer_size)) {
-        return Status::Corruption(strings::Substitute("Bad page: invalid footer, file=$0", opts.read_file->filename()));
+        return Status::Corruption(
+                strings::Substitute("Bad page: invalid footer, read from disk, file=$0, footer_size=$1",
+                                    opts.read_file->filename(), footer_size));
     }
 
     uint32_t body_size = page_slice.size - 4 - footer_size;

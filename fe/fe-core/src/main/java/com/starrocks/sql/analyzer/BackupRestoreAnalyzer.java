@@ -20,8 +20,10 @@ import com.google.common.collect.Sets;
 import com.starrocks.analysis.TableName;
 import com.starrocks.analysis.TableRef;
 import com.starrocks.backup.Repository;
+import com.starrocks.catalog.BaseTableInfo;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.ListPartitionInfo;
+import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PartitionInfo;
@@ -40,20 +42,25 @@ import com.starrocks.sql.ast.RestoreStmt;
 import com.starrocks.sql.ast.ShowBackupStmt;
 import com.starrocks.sql.ast.ShowRestoreStmt;
 import com.starrocks.sql.ast.StatementBase;
+import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 public class BackupRestoreAnalyzer {
+    private static final Logger LOG = LogManager.getLogger(BackupRestoreAnalyzer.class);
 
     public static void analyze(StatementBase statement, ConnectContext session) {
         new BackupRestoreStmtAnalyzerVisitor().analyze(statement, session);
     }
 
-    public static class BackupRestoreStmtAnalyzerVisitor extends AstVisitor<Void, ConnectContext> {
+    public static class BackupRestoreStmtAnalyzerVisitor implements AstVisitor<Void, ConnectContext> {
 
         private static final String PROP_TIMEOUT = "timeout";
         private static final long MIN_TIMEOUT_MS = 600_000L; // 10 min
@@ -79,21 +86,54 @@ public class BackupRestoreAnalyzer {
             // We should backup all table in current database.
             if (tableRefs.size() == 0) {
                 for (Table tbl : database.getTables()) {
+                    if (!Config.enable_backup_materialized_view && tbl.isMaterializedView()) {
+                        LOG.info("Skip backup materialized view: {} because " +
+                                        "`Config.enable_backup_materialized_view=false`", tbl.getName());
+                        continue;
+                    }
+                    if (tbl.isTemporaryTable()) {
+                        continue;
+                    }
                     TableName tableName = new TableName(dbName, tbl.getName());
                     TableRef tableRef = new TableRef(tableName, null, null);
                     tableRefs.add(tableRef);
                 }
             }
+
+            Map<Long, TableRef> tableIdToTableRefMap = Maps.newHashMap();
+            Map<String, MaterializedView> mvNameMVMap = Maps.newHashMap();
             for (TableRef tableRef : tableRefs) {
-                analyzeTableRef(tableRef, dbName, database, tblPartsMap, context.getCurrentCatalog());
+                analyzeTableRef(tableRef, dbName, database, tblPartsMap, context.getCurrentCatalog(),
+                        mvNameMVMap, tableIdToTableRefMap);
                 if (tableRef.hasExplicitAlias()) {
                     throw new SemanticException("Can not set alias for table in Backup Stmt: " + tableRef,
                             tableRef.getPos());
                 }
             }
 
-            tableRefs.clear();
-            tableRefs.addAll(tblPartsMap.values());
+            if (!mvNameMVMap.isEmpty()) {
+                // check base table existed in the same db.
+                for (Map.Entry<String, MaterializedView> e : mvNameMVMap.entrySet()) {
+                    MaterializedView mv = e.getValue();
+                    for (BaseTableInfo baseTableInfo : mv.getBaseTableInfos()) {
+                        if (!tableIdToTableRefMap.containsKey(baseTableInfo.getTableId())) {
+                            LOG.warn(String.format("Backup/restore materialized view %s's" +
+                                    " base table %s is not in the same db with the mv", mv.getName(),
+                                    baseTableInfo.getTableId()));
+                        }
+                    }
+                }
+
+                // reorder the tableRefs to ensure ref tables of materialized views are ahead of the materialized view
+                Map<String, TableRef> newTableRefs = reorderTableRefsWithMaterializedView(database, tblPartsMap, mvNameMVMap,
+                        tableIdToTableRefMap);
+                tableRefs.clear();
+                tableRefs.addAll(newTableRefs.values());
+            } else {
+                tableRefs.clear();
+                tableRefs.addAll(tblPartsMap.values());
+            }
+
             Map<String, String> properties = backupStmt.getProperties();
             long timeoutMs = Config.backup_job_default_timeout_ms;
             Iterator<Map.Entry<String, String>> iterator = properties.entrySet().iterator();
@@ -131,6 +171,66 @@ public class BackupRestoreAnalyzer {
             }
 
             return null;
+        }
+
+        private Map<String, TableRef> reorderTableRefsWithMaterializedView(Database database,
+                                                                           Map<String, TableRef> tblPartsMap,
+                                                                           Map<String, MaterializedView> mvPartsMap,
+                                                                           Map<Long, TableRef> tableIdToTableRefMap) {
+            Map<String, TableRef> orderedTableNameRefMap = Maps.newLinkedHashMap();
+            for (Map.Entry<String, TableRef> e : tblPartsMap.entrySet()) {
+                collectTableRefAndDependencies(database, e.getKey(), e.getValue(), mvPartsMap, tableIdToTableRefMap,
+                        orderedTableNameRefMap);
+            }
+            return orderedTableNameRefMap;
+        }
+
+        private void collectTableRefAndDependencies(Database database,
+                                                    String tableName,
+                                                    TableRef tableRef,
+                                                    Map<String, MaterializedView> mvPartsMap,
+                                                    Map<Long, TableRef> tableIdToTableRefMap,
+                                                    Map<String, TableRef> result) {
+            // table is already collected.
+            if (result.containsKey(tableName)) {
+                return;
+            }
+
+            // post-order the table ref, first iterate the materialized view's base tables
+            if (mvPartsMap.containsKey(tableName)) {
+                MaterializedView mv = mvPartsMap.get(tableName);
+                for (BaseTableInfo baseTableInfo : mv.getBaseTableInfos()) {
+                    Optional<Database> dbOpt = GlobalStateMgr.getCurrentState().getMetadataMgr().getDatabase(baseTableInfo);
+                    if (dbOpt.isEmpty()) {
+                        LOG.warn("database {} do not exist when collect table info for table: {}",
+                                baseTableInfo.getDbInfoStr(), tableName);
+                        continue;
+                    }
+                    if (dbOpt.get().getId() != database.getId()) {
+                        // if the referred base table is not the same with the current database, skip it.
+                        LOG.warn("The referred base table {} 's database is different from the materialized view {}, " +
+                                        "skip backup it", baseTableInfo.getTableName(), tableRef.getName());
+                        continue;
+                    }
+                    Optional<Table> baseTableOpt = MvUtils.getTableWithIdentifier(baseTableInfo);
+                    if (baseTableOpt.isEmpty()) {
+                        LOG.warn("The referred base table {} is not found in catalog, " +
+                                "skip backup it", baseTableInfo.getTableName());
+                    }
+                    Table baseTable = baseTableOpt.get();
+                    if (!tableIdToTableRefMap.containsKey(baseTable.getId())) {
+                        // if the table_id->table_ref map not contains the ref base table, skip it
+                        LOG.warn("The referred base table {} is not found in the collected table ref map, " +
+                                        "skip backup it", baseTable.getName());
+                        continue;
+                    }
+                    collectTableRefAndDependencies(database, baseTable.getName(),
+                            tableIdToTableRefMap.get(baseTable.getId()), mvPartsMap, tableIdToTableRefMap, result);
+                }
+            }
+
+            // then collect the table ref at the last
+            result.put(tableName, tableRef);
         }
 
         @Override
@@ -289,10 +389,13 @@ public class BackupRestoreAnalyzer {
     }
 
     public static void analyzeTableRef(TableRef tableRef, String dbName, Database db,
-                                       Map<String, TableRef> tblPartsMap, String catalog) {
+                                       Map<String, TableRef> tblPartsMap, String catalog,
+                                       Map<String, MaterializedView> tblMaterializedViewMap,
+                                       Map<Long, TableRef> tableIdToTableRefMap) {
         TableName tableName = tableRef.getName();
         tableName.setCatalog(catalog);
         tableName.setDb(dbName);
+
         PartitionNames partitionNames = tableRef.getPartitionNames();
         Table tbl = db.getTable(tableName.getTbl());
         if (null == tbl) {
@@ -308,7 +411,6 @@ public class BackupRestoreAnalyzer {
             }
         }
 
-
         if (tbl instanceof OlapTable) {
             PartitionInfo partitionInfo = ((OlapTable) tbl).getPartitionInfo();
             if (partitionInfo instanceof ListPartitionInfo) {
@@ -316,8 +418,23 @@ public class BackupRestoreAnalyzer {
             }
         }
 
+        tableIdToTableRefMap.put(tbl.getId(), tableRef);
+        if (tbl.isMaterializedView()) {
+            MaterializedView mv = (MaterializedView) tbl;
+            // check its base tables exist for materialized view.
+            List<BaseTableInfo> baseTableInfos = mv.getBaseTableInfos();
+            for (BaseTableInfo baseTableInfo : baseTableInfos) {
+                Optional<Table> refTableOpt = MvUtils.getTableWithIdentifier(baseTableInfo);
+                if (refTableOpt.isEmpty()) {
+                    throw new SemanticException(String.format("Base table %s doest not existed in materialized view %s when " +
+                            "backup/restore", baseTableInfo.getTableName(), mv.getName()));
+                }
+                tblMaterializedViewMap.put(mv.getName(), mv);
+            }
+        }
+
         if (partitionNames != null) {
-            if (!tbl.isOlapOrCloudNativeTable()) {
+            if (!tbl.isNativeTableOrMaterializedView()) {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_WRONG_TABLE_NAME, tableName.getTbl());
             }
             OlapTable olapTbl = (OlapTable) tbl;

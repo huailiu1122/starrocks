@@ -48,7 +48,7 @@ public:
 
     // Use mv epoch manager to interact with FE
     Status prepare(RuntimeState* state) override {
-        SourceOperator::prepare(state);
+        (void)SourceOperator::prepare(state);
         _stream_epoch_manager = state->query_ctx()->stream_epoch_manager();
         DCHECK(_stream_epoch_manager);
         return Status::OK();
@@ -106,7 +106,7 @@ public:
 
     // Use mv epoch manager to interact with FE
     Status prepare(RuntimeState* state) override {
-        Operator::prepare(state);
+        (void)Operator::prepare(state);
         return Status::OK();
     }
 

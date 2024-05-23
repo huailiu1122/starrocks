@@ -33,6 +33,7 @@
 // under the License.
 package com.starrocks.mysql.nio;
 
+import com.starrocks.common.Pair;
 import com.starrocks.common.util.LogUtil;
 import com.starrocks.mysql.MysqlProto;
 import com.starrocks.qe.ConnectContext;
@@ -46,6 +47,7 @@ import org.xnio.StreamConnection;
 import org.xnio.channels.AcceptingChannel;
 
 import java.io.IOException;
+import java.net.SocketAddress;
 import javax.net.ssl.SSLContext;
 
 /**
@@ -68,12 +70,14 @@ public class AcceptListener implements ChannelListener<AcceptingChannel<StreamCo
             if (connection == null) {
                 return;
             }
-            LOG.info("Connection established. remote={}", connection.getPeerAddress());
             // connection has been established, so need to call context.cleanup()
             // if exception happens.
             NConnectContext context = new NConnectContext(connection, sslContext);
             context.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
             connectScheduler.submit(context);
+            int connectionId = context.getConnectionId();
+            SocketAddress remoteAddr = connection.getPeerAddress();
+            LOG.info("Connection established. remote={}, connectionId={}", remoteAddr, connectionId);
 
             try {
                 channel.getWorker().execute(() -> {
@@ -81,20 +85,23 @@ public class AcceptListener implements ChannelListener<AcceptingChannel<StreamCo
                     try {
                         // Set thread local info
                         context.setThreadLocalInfo();
+                        LOG.info("Connection scheduled to worker thread {}. remote={}, connectionId={}",
+                                Thread.currentThread().getId(), remoteAddr, connectionId);
                         context.setConnectScheduler(connectScheduler);
                         // authenticate check failed.
                         result = MysqlProto.negotiate(context);
                         if (!result.isSuccess()) {
                             throw new AfterConnectedException("mysql negotiate failed");
                         }
-                        if (connectScheduler.registerConnection(context)) {
+                        Pair<Boolean, String> registerResult = connectScheduler.registerConnection(context);
+                        if (registerResult.first) {
                             MysqlProto.sendResponsePacket(context);
                             connection.setCloseListener(
                                     streamConnection -> connectScheduler.unregisterConnection(context));
                         } else {
-                            context.getState().setError("Reach limit of connections");
+                            context.getState().setError(registerResult.second);
                             MysqlProto.sendResponsePacket(context);
-                            throw new AfterConnectedException("Reach limit of connections");
+                            throw new AfterConnectedException(registerResult.second);
                         }
                         context.setStartTime();
                         ConnectProcessor processor = new ConnectProcessor(context);
@@ -103,6 +110,7 @@ public class AcceptListener implements ChannelListener<AcceptingChannel<StreamCo
                         // do not need to print log for this kind of exception.
                         // just clean up the context;
                         context.cleanup();
+                        context.getState().setError(e.getMessage());
                     } catch (Throwable e) {
                         if (e instanceof Error) {
                             LOG.error("connect processor exception because ", e);
@@ -111,6 +119,7 @@ public class AcceptListener implements ChannelListener<AcceptingChannel<StreamCo
                             LOG.warn("connect processor exception because ", e);
                         }
                         context.cleanup();
+                        context.getState().setError(e.getMessage());
                     } finally {
                         LogUtil.logConnectionInfoToAuditLogAndQueryQueue(context,
                                 result == null ? null : result.getAuthPacket());

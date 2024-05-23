@@ -44,13 +44,15 @@ import com.starrocks.common.proc.ProcNodeInterface;
 import com.starrocks.common.proc.ProcService;
 import com.starrocks.common.proc.TableProcDir;
 import com.starrocks.common.util.OrderByPair;
+import com.starrocks.common.util.concurrent.lock.LockType;
+import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ShowTemporaryTableStmt;
 import com.starrocks.sql.ast.AstVisitor;
 import com.starrocks.sql.ast.DescribeStmt;
 import com.starrocks.sql.ast.ShowAlterStmt;
-import com.starrocks.sql.ast.ShowClustersStmt;
 import com.starrocks.sql.ast.ShowColumnStmt;
 import com.starrocks.sql.ast.ShowCreateDbStmt;
 import com.starrocks.sql.ast.ShowCreateExternalCatalogStmt;
@@ -74,7 +76,7 @@ import com.starrocks.sql.ast.ShowTableStatusStmt;
 import com.starrocks.sql.ast.ShowTableStmt;
 import com.starrocks.sql.ast.ShowTabletStmt;
 import com.starrocks.sql.ast.ShowTransactionStmt;
-import com.starrocks.sql.ast.ShowWarehousesStmt;
+import com.starrocks.sql.common.MetaUtils;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -93,7 +95,7 @@ public class ShowStmtAnalyzer {
         new ShowStmtAnalyzerVisitor().analyze(stmt, session);
     }
 
-    static class ShowStmtAnalyzerVisitor extends AstVisitor<Void, ConnectContext> {
+    static class ShowStmtAnalyzerVisitor implements AstVisitor<Void, ConnectContext> {
 
         private static final Logger LOGGER = LoggerFactory.getLogger(ShowStmtAnalyzerVisitor.class);
 
@@ -119,6 +121,21 @@ public class ShowStmtAnalyzer {
             node.setDb(db);
             return null;
         }
+
+        @Override
+        public Void visitShowTemporaryTablesStatement(ShowTemporaryTableStmt node, ConnectContext context) {
+            String catalogName;
+            if (node.getCatalogName() != null) {
+                catalogName = node.getCatalogName();
+            } else {
+                catalogName = context.getCurrentCatalog();
+            }
+            if (!CatalogMgr.isInternalCatalog(catalogName)) {
+                throw new SemanticException("show temporary table is not supported under non-default catalog");
+            }
+            return visitShowTableStatement(node, context);
+        }
+
 
         @Override
         public Void visitShowTabletStatement(ShowTabletStmt node, ConnectContext context) {
@@ -176,25 +193,6 @@ public class ShowStmtAnalyzer {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_NO_TABLES_USED);
             }
             node.getTbl().normalization(context);
-            return null;
-        }
-
-        @Override
-        public Void visitShowWarehousesStatement(ShowWarehousesStmt node, ConnectContext context) {
-            return null;
-        }
-
-        @Override
-        public Void visitShowClusterStatement(ShowClustersStmt node, ConnectContext context) {
-            String warehouseName;
-            if (node.getWarehouseName() != null) {
-                warehouseName = node.getWarehouseName();
-            } else {
-                warehouseName = context.getCurrentWarehouse();
-            }
-            if (!GlobalStateMgr.getCurrentState().getWarehouseMgr().warehouseExists(warehouseName)) {
-                ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_WAREHOUSE_ERROR, warehouseName);
-            }
             return null;
         }
 
@@ -338,9 +336,16 @@ public class ShowStmtAnalyzer {
             if (db == null) {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_DB_ERROR, node.getDb());
             }
-            db.readLock();
+            Locker locker = new Locker();
+            locker.lockDatabase(db, LockType.READ);
             try {
-                Table table = db.getTable(node.getTableName());
+                Table table = null;
+                try {
+                    table = MetaUtils.getSessionAwareTable(context, db, node.getDbTableName());
+                } catch (Exception e) {
+                    // if table is not found, may be is statement "desc materialized-view-name",
+                    // ignore this exception.
+                }
                 //if getTable not find table, may be is statement "desc materialized-view-name"
                 if (table == null) {
                     for (Table tb : db.getTables()) {
@@ -475,7 +480,7 @@ public class ShowStmtAnalyzer {
                     }
                 }
             } finally {
-                db.readUnlock();
+                locker.unLockDatabase(db, LockType.READ);
             }
         }
 
@@ -534,11 +539,13 @@ public class ShowStmtAnalyzer {
             if (db == null) {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
             }
+
             final String tableName = statement.getTableName();
             final boolean isTempPartition = statement.isTempPartition();
-            db.readLock();
+            Locker locker = new Locker();
+            locker.lockDatabase(db, LockType.READ);
             try {
-                Table table = db.getTable(tableName);
+                Table table = MetaUtils.getSessionAwareTable(context, db, new TableName(dbName, tableName));
                 if (!(table instanceof OlapTable)) {
                     throw new SemanticException("Table[" + tableName + "] does not exists or is not OLAP table");
                 }
@@ -567,7 +574,7 @@ public class ShowStmtAnalyzer {
                         analyzeOrderBy(statement.getOrderByElements(), statement.getNode());
                 statement.setOrderByPairs(orderByPairs);
             } finally {
-                db.readUnlock();
+                locker.unLockDatabase(db, LockType.READ);
             }
             return null;
         }

@@ -47,9 +47,15 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.Status;
 import com.starrocks.common.ThriftServer;
 import com.starrocks.common.UserException;
+import com.starrocks.common.profile.Timer;
+import com.starrocks.common.profile.Tracers;
+import com.starrocks.common.util.AuditStatisticsUtil;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.RuntimeProfile;
+import com.starrocks.common.util.concurrent.FairReentrantLock;
 import com.starrocks.connector.exception.RemoteFileNotFoundException;
+import com.starrocks.datacache.DataCacheSelectMetrics;
+import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.planner.PlanFragment;
 import com.starrocks.planner.ResultSink;
 import com.starrocks.planner.RuntimeFilterDescription;
@@ -58,7 +64,6 @@ import com.starrocks.planner.StreamLoadPlanner;
 import com.starrocks.privilege.PrivilegeBuiltinConstants;
 import com.starrocks.proto.PPlanFragmentCancelReason;
 import com.starrocks.proto.PQueryStatistics;
-import com.starrocks.proto.QueryStatisticsItemPB;
 import com.starrocks.qe.scheduler.Coordinator;
 import com.starrocks.qe.scheduler.Deployer;
 import com.starrocks.qe.scheduler.QueryRuntimeProfile;
@@ -71,11 +76,9 @@ import com.starrocks.qe.scheduler.slot.LogicalSlot;
 import com.starrocks.rpc.RpcException;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.LoadPlanner;
-import com.starrocks.sql.PlannerProfile;
 import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.system.ComputeNode;
-import com.starrocks.thrift.TAuditStatisticsItem;
 import com.starrocks.thrift.TDescriptorTable;
 import com.starrocks.thrift.TLoadJobType;
 import com.starrocks.thrift.TNetworkAddress;
@@ -89,7 +92,6 @@ import com.starrocks.thrift.TStatusCode;
 import com.starrocks.thrift.TTabletCommitInfo;
 import com.starrocks.thrift.TTabletFailInfo;
 import com.starrocks.thrift.TUniqueId;
-import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -100,10 +102,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -122,11 +125,11 @@ public class DefaultCoordinator extends Coordinator {
     /**
      * Protects all the fields below.
      */
-    private final Lock lock = new ReentrantLock();
+    private final Lock lock = new FairReentrantLock();
 
     /**
      * Overall status of the entire query.
-     * <p> Set to the first reported fragment error status or to CANCELLED, if {@link #cancel()} is called.
+     * <p> Set to the first reported fragment error status or to CANCELLED, if {@link #cancel(String cancelledMessage)} is called.
      */
     private Status queryStatus = new Status();
 
@@ -148,13 +151,18 @@ public class DefaultCoordinator extends Coordinator {
 
     private LogicalSlot slot = null;
 
+    private ShortCircuitExecutor shortCircuitExecutor = null;
+    private boolean isShortCircuit = false;
+    private boolean isBinaryRow = false;
+
     public static class Factory implements Coordinator.Factory {
 
         @Override
         public DefaultCoordinator createQueryScheduler(ConnectContext context, List<PlanFragment> fragments,
                                                        List<ScanNode> scanNodes,
                                                        TDescriptorTable descTable) {
-            JobSpec jobSpec = JobSpec.Factory.fromQuerySpec(context, fragments, scanNodes, descTable, TQueryType.SELECT);
+            JobSpec jobSpec =
+                    JobSpec.Factory.fromQuerySpec(context, fragments, scanNodes, descTable, TQueryType.SELECT);
             return new DefaultCoordinator(context, jobSpec);
         }
 
@@ -193,18 +201,30 @@ public class DefaultCoordinator extends Coordinator {
                                                               List<PlanFragment> fragments, List<ScanNode> scanNodes,
                                                               String timezone,
                                                               long startTime, Map<String, String> sessionVariables,
-                                                              long execMemLimit) {
+                                                              long execMemLimit, long warehouseId) {
             ConnectContext context = new ConnectContext();
             context.setQualifiedUser(AuthenticationMgr.ROOT_USER);
             context.setCurrentUserIdentity(UserIdentity.ROOT);
             context.setCurrentRoleIds(Sets.newHashSet(PrivilegeBuiltinConstants.ROOT_ROLE_ID));
             context.getSessionVariable().setEnablePipelineEngine(true);
             context.getSessionVariable().setPipelineDop(0);
+            context.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
+            context.setCurrentWarehouseId(warehouseId);
 
             JobSpec jobSpec = JobSpec.Factory.fromBrokerExportSpec(context, jobId, queryId, descTable,
                     fragments, scanNodes, timezone,
                     startTime, sessionVariables, execMemLimit);
 
+            return new DefaultCoordinator(context, jobSpec);
+        }
+
+        @Override
+        public DefaultCoordinator createRefreshDictionaryCacheScheduler(ConnectContext context, TUniqueId queryId,
+                                                                        DescriptorTable descTable, List<PlanFragment> fragments,
+                                                                        List<ScanNode> scanNodes) {
+
+            JobSpec jobSpec = JobSpec.Factory.fromRefreshDictionaryCacheSpec(context, queryId, descTable, fragments,
+                    scanNodes);
             return new DefaultCoordinator(context, jobSpec);
         }
 
@@ -216,10 +236,11 @@ public class DefaultCoordinator extends Coordinator {
                                                                        String timezone,
                                                                        long startTime,
                                                                        Map<String, String> sessionVariables,
-                                                                       ConnectContext context, long execMemLimit) {
+                                                                       ConnectContext context, long execMemLimit,
+                                                                       long warehouseId) {
             JobSpec jobSpec = JobSpec.Factory.fromNonPipelineBrokerLoadJobSpec(context, jobId, queryId, descTable,
                     fragments, scanNodes, timezone,
-                    startTime, sessionVariables, execMemLimit);
+                    startTime, sessionVariables, execMemLimit, warehouseId);
 
             return new DefaultCoordinator(context, jobSpec);
         }
@@ -256,6 +277,20 @@ public class DefaultCoordinator extends Coordinator {
         this.executionDAG = coordinatorPreprocessor.getExecutionDAG();
 
         this.queryProfile = new QueryRuntimeProfile(connectContext, jobSpec, executionDAG.getFragmentsInCreatedOrder().size());
+        List<PlanFragment> fragments = jobSpec.getFragments();
+        List<ScanNode> scanNodes = jobSpec.getScanNodes();
+        TDescriptorTable descTable = jobSpec.getDescTable();
+
+        if (connectContext.getCommand() == MysqlCommand.COM_STMT_EXECUTE) {
+            isBinaryRow = true;
+        }
+
+        shortCircuitExecutor = ShortCircuitExecutor.create(context, fragments, scanNodes, descTable,
+                isBinaryRow, jobSpec.isNeedReport(), jobSpec.getPlanProtocol());
+
+        if (null != shortCircuitExecutor) {
+            isShortCircuit = true;
+        }
     }
 
     @Override
@@ -374,8 +409,8 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
-    public void setExecPlanSupplier(Supplier<ExecPlan> execPlanSupplier) {
-        queryProfile.setExecPlanSupplier(execPlanSupplier);
+    public void setExecPlan(ExecPlan execPlan) {
+        queryProfile.setExecPlan(execPlan);
     }
 
     @Override
@@ -416,6 +451,11 @@ public class DefaultCoordinator extends Coordinator {
                     DebugUtil.printId(jobSpec.getQueryId()), jobSpec.getDescTable());
         }
 
+        if (slot != null && slot.getPipelineDop() > 0 &&
+                slot.getPipelineDop() != jobSpec.getQueryOptions().getPipeline_dop()) {
+            jobSpec.getFragments().forEach(fragment -> fragment.limitMaxPipelineDop(slot.getPipelineDop()));
+        }
+
         coordinatorPreprocessor.prepareExec();
 
         prepareResultSink();
@@ -425,8 +465,11 @@ public class DefaultCoordinator extends Coordinator {
 
     @Override
     public void onFinished() {
-        GlobalStateMgr.getCurrentState().getSlotProvider().cancelSlotRequirement(slot);
-        GlobalStateMgr.getCurrentState().getSlotProvider().releaseSlot(slot);
+        jobSpec.getSlotProvider().cancelSlotRequirement(slot);
+        jobSpec.getSlotProvider().releaseSlot(slot);
+        // for async profile, if Be doesn't report profile in time, we upload the most complete profile
+        // into profile Manager here. IN other case, queryProfile.finishAllInstances just do nothing here
+        queryProfile.finishAllInstances(Status.OK);
     }
 
     public CoordinatorPreprocessor getPrepareInfo() {
@@ -448,15 +491,20 @@ public class DefaultCoordinator extends Coordinator {
 
     @Override
     public void startScheduling(boolean needDeploy) throws Exception {
-        try (PlannerProfile.ScopedTimer timer = PlannerProfile.getScopedTimer("Scheduler.Pending")) {
+        try (Timer timer = Tracers.watchScope(Tracers.Module.SCHEDULER, "Pending")) {
             QueryQueueManager.getInstance().maybeWait(connectContext, this);
         }
 
-        try (PlannerProfile.ScopedTimer timer = PlannerProfile.getScopedTimer("Scheduler.Prepare")) {
+        if (isShortCircuit) {
+            execShortCircuit();
+            return;
+        }
+
+        try (Timer timer = Tracers.watchScope(Tracers.Module.SCHEDULER, "Prepare")) {
             prepareExec();
         }
 
-        try (PlannerProfile.ScopedTimer timer = PlannerProfile.getScopedTimer("Scheduler.Deploy")) {
+        try (Timer timer = Tracers.watchScope(Tracers.Module.SCHEDULER, "Deploy")) {
             deliverExecFragments(needDeploy);
         }
 
@@ -477,7 +525,21 @@ public class DefaultCoordinator extends Coordinator {
         ExecutionFragment rootExecFragment = executionDAG.getRootFragment();
         boolean isLoadType = !(rootExecFragment.getPlanFragment().getSink() instanceof ResultSink);
         if (isLoadType) {
-            jobSpec.getQueryOptions().setEnable_profile(true);
+            // for non-pipeline engine, enable_profile is renamed from is_report_success,
+            // which is not only for report profile but also for report success.
+            // for pipeline engine, enable_profile is only for report profile.
+            // when enable_profile is true by default, the runtime profile of pipeline engine may use a lot of memory.
+            // so we only set enable_profile to true when use non-pipeline engine.
+            if (!jobSpec.isEnablePipeline()) {
+                jobSpec.getQueryOptions().setEnable_profile(true);
+            }
+            if (jobSpec.isBrokerLoad() && jobSpec.getQueryOptions().getBig_query_profile_threshold() == 0) {
+                jobSpec.getQueryOptions().setBig_query_profile_threshold(Config.default_big_load_profile_threshold_second * 1000);
+            }
+            // runtime load profile does not need to report too frequently
+            if (jobSpec.getQueryOptions().getRuntime_profile_report_interval() < 30) {
+                jobSpec.getQueryOptions().setRuntime_profile_report_interval(30);
+            }
             List<Long> relatedBackendIds = coordinatorPreprocessor.getWorkerProvider().getSelectedWorkerIds();
             GlobalStateMgr.getCurrentState().getLoadMgr().initJobProgress(
                     jobSpec.getLoadJobId(), jobSpec.getQueryId(), executionDAG.getInstanceIds(), relatedBackendIds);
@@ -490,13 +552,23 @@ public class DefaultCoordinator extends Coordinator {
 
     private void prepareResultSink() throws AnalysisException {
         ExecutionFragment rootExecFragment = executionDAG.getRootFragment();
+        long workerId = rootExecFragment.getInstances().get(0).getWorkerId();
+        ComputeNode worker = coordinatorPreprocessor.getWorkerProvider().getWorkerById(workerId);
+        // Select top fragment as global runtime filter merge address
+        setGlobalRuntimeFilterParams(rootExecFragment, worker.getBrpcIpAddress());
         boolean isLoadType = !(rootExecFragment.getPlanFragment().getSink() instanceof ResultSink);
         if (isLoadType) {
+            // TODO (by satanson): Other DataSink except ResultSink can not support global
+            //  runtime filter merging at present, we should support it in future.
+            // pipeline-level runtime filter needs to derive RuntimeFilterLayout, so we collect
+            // RuntimeFilterDescription
+            for (ExecutionFragment execFragment : executionDAG.getFragmentsInPreorder()) {
+                PlanFragment fragment = execFragment.getPlanFragment();
+                fragment.collectBuildRuntimeFilters(fragment.getPlanRoot());
+            }
             return;
         }
 
-        long workerId = rootExecFragment.getInstances().get(0).getWorkerId();
-        ComputeNode worker = coordinatorPreprocessor.getWorkerProvider().getWorkerById(workerId);
         TNetworkAddress execBeAddr = worker.getAddress();
         receiver = new ResultReceiver(
                 rootExecFragment.getInstances().get(0).getInstanceId(),
@@ -504,15 +576,15 @@ public class DefaultCoordinator extends Coordinator {
                 worker.getBrpcAddress(),
                 jobSpec.getQueryOptions().query_timeout * 1000);
 
-        // Select top fragment as global runtime filter merge address
-        setGlobalRuntimeFilterParams(rootExecFragment, worker.getBrpcAddress());
-
         if (LOG.isDebugEnabled()) {
             LOG.debug("dispatch query job: {} to {}", DebugUtil.printId(jobSpec.getQueryId()), execBeAddr);
         }
 
         // set the broker address for OUTFILE sink
         ResultSink resultSink = (ResultSink) rootExecFragment.getPlanFragment().getSink();
+        if (isBinaryRow) {
+            resultSink.setBinaryRow(true);
+        }
         if (resultSink.isOutputFileSink() && resultSink.needBroker()) {
             FsBroker broker = GlobalStateMgr.getCurrentState().getBrokerMgr().getBroker(resultSink.getBrokerName(),
                     execBeAddr.getHostname());
@@ -523,7 +595,7 @@ public class DefaultCoordinator extends Coordinator {
 
     private void deliverExecFragments(boolean needDeploy) throws RpcException, UserException {
         lock();
-        try {
+        try (Timer ignored = Tracers.watchScope(Tracers.Module.SCHEDULER, "DeployLockInternalTime")) {
             Deployer deployer =
                     new Deployer(connectContext, jobSpec, executionDAG, coordinatorPreprocessor.getCoordAddress(),
                             this::handleErrorExecution);
@@ -544,7 +616,7 @@ public class DefaultCoordinator extends Coordinator {
             case TIMEOUT:
                 throw new UserException("query timeout. backend id: " + execution.getWorker().getId());
             case THRIFT_RPC_ERROR:
-                SimpleScheduler.addToBlacklist(execution.getWorker().getId());
+                SimpleScheduler.addToBlocklist(execution.getWorker().getId());
                 throw new RpcException(execution.getWorker().getHost(), "rpc failed");
             default:
                 throw new UserException(status.getErrorMsg());
@@ -602,7 +674,7 @@ public class DefaultCoordinator extends Coordinator {
                     TRuntimeFilterProberParams probeParam = new TRuntimeFilterProberParams();
                     probeParam.setFragment_instance_id(instance.getInstanceId());
                     probeParam.setFragment_instance_address(
-                            coordinatorPreprocessor.getBrpcAddress(instance.getWorkerId()));
+                            coordinatorPreprocessor.getBrpcIpAddress(instance.getWorkerId()));
                     probeParamList.add(probeParam);
                 }
                 if (jobSpec.isEnablePipeline() && kv.getValue().isBroadcastJoin() &&
@@ -690,6 +762,9 @@ public class DefaultCoordinator extends Coordinator {
 
     @Override
     public RowBatch getNext() throws Exception {
+        if (isShortCircuit) {
+            return shortCircuitExecutor.getNext();
+        }
         if (receiver == null) {
             throw new UserException("There is no receiver.");
         }
@@ -774,10 +849,9 @@ public class DefaultCoordinator extends Coordinator {
             cancelInternal(reason);
         } finally {
             try {
-                // when enable_profile is true, it disable count down profileDoneSignal for collect all backend's profile
+                // Disable count down profileDoneSignal for collect all backend's profile
                 // but if backend has crashed, we need count down profileDoneSignal since it will not report by itself
-                if (connectContext.getSessionVariable().isEnableProfile() &&
-                        message.equals(FeConstants.BACKEND_NODE_NOT_FOUND_ERROR)) {
+                if (message.equals(FeConstants.BACKEND_NODE_NOT_FOUND_ERROR)) {
                     queryProfile.finishAllInstances(Status.OK);
                     LOG.info("count down profileDoneSignal since backend has crashed, query id: {}",
                             DebugUtil.printId(jobSpec.getQueryId()));
@@ -789,7 +863,7 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     private void cancelInternal(PPlanFragmentCancelReason cancelReason) {
-        GlobalStateMgr.getCurrentState().getSlotProvider().cancelSlotRequirement(slot);
+        jobSpec.getSlotProvider().cancelSlotRequirement(slot);
         if (StringUtils.isEmpty(connectContext.getState().getErrorMessage())) {
             connectContext.getState().setError(cancelReason.toString());
         }
@@ -799,7 +873,7 @@ public class DefaultCoordinator extends Coordinator {
         cancelRemoteFragmentsAsync(cancelReason);
         if (cancelReason != PPlanFragmentCancelReason.LIMIT_REACH) {
             // count down to zero to notify all objects waiting for this
-            if (!connectContext.getSessionVariable().isEnableProfile()) {
+            if (!connectContext.isProfileEnabled()) {
                 queryProfile.finishAllInstances(Status.OK);
             }
         }
@@ -837,6 +911,8 @@ public class DefaultCoordinator extends Coordinator {
             if (!execState.updateExecStatus(params)) {
                 return;
             }
+
+            queryProfile.updateLoadChannelProfile(params);
         } finally {
             unlock();
         }
@@ -860,9 +936,10 @@ public class DefaultCoordinator extends Coordinator {
             if (ctx != null) {
                 ctx.setErrorCodeOnce(status.getErrorCodeString());
             }
-            LOG.warn("exec state report failed status={}, query_id={}, instance_id={}",
+            LOG.warn("exec state report failed status={}, query_id={}, instance_id={}, backend_id={}",
                     status, DebugUtil.printId(jobSpec.getQueryId()),
-                    DebugUtil.printId(params.getFragment_instance_id()));
+                    DebugUtil.printId(params.getFragment_instance_id()),
+                    params.getBackend_id());
             updateStatus(status, params.getFragment_instance_id());
         }
 
@@ -881,23 +958,12 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
-    public void updateAuditStatistics(TReportAuditStatisticsParams params) {
-        auditStatistics = new PQueryStatistics();
-        auditStatistics.scanRows = params.scan_rows;
-        auditStatistics.scanBytes = params.scan_bytes;
-        auditStatistics.returnedRows = params.returned_rows;
-        auditStatistics.cpuCostNs = params.cpu_cost_ns;
-        auditStatistics.memCostBytes = params.mem_cost_bytes;
-        auditStatistics.spillBytes = params.spill_bytes;
-        if (CollectionUtils.isNotEmpty(params.stats_items)) {
-            auditStatistics.statsItems = Lists.newArrayList();
-            for (TAuditStatisticsItem item : params.stats_items) {
-                QueryStatisticsItemPB itemPB = new QueryStatisticsItemPB();
-                itemPB.scanBytes = item.scan_bytes;
-                itemPB.scanRows = item.scan_rows;
-                itemPB.tableId = item.table_id;
-                auditStatistics.statsItems.add(itemPB);
-            }
+    public synchronized void updateAuditStatistics(TReportAuditStatisticsParams params) {
+        PQueryStatistics newAuditStatistics = AuditStatisticsUtil.toProtobuf(params.audit_statistics);
+        if (auditStatistics == null) {
+            auditStatistics = newAuditStatistics;
+        } else {
+            AuditStatisticsUtil.mergeProtobuf(newAuditStatistics, auditStatistics);
         }
     }
 
@@ -922,7 +988,7 @@ public class DefaultCoordinator extends Coordinator {
         }
     }
 
-    public void endProfile() {
+    public void collectProfileSync() {
         if (executionDAG.getExecutions().isEmpty()) {
             return;
         }
@@ -948,6 +1014,33 @@ public class DefaultCoordinator extends Coordinator {
         } finally {
             unlock();
         }
+    }
+
+    public boolean tryProcessProfileAsync(Consumer<Boolean> task) {
+        if (executionDAG.getExecutions().isEmpty()) {
+            return false;
+        }
+        if (!jobSpec.isNeedReport()) {
+            return false;
+        }
+        boolean enableAsyncProfile = true;
+        if (connectContext != null && connectContext.getSessionVariable() != null) {
+            enableAsyncProfile = connectContext.getSessionVariable().isEnableAsyncProfile();
+        }
+        TUniqueId queryId = null;
+        if (connectContext != null) {
+            queryId = connectContext.getExecutionId();
+        }
+
+        if (!enableAsyncProfile || !queryProfile.addListener(task)) {
+            if (enableAsyncProfile) {
+                LOG.info("Profile task is full, execute in sync mode, query id = {}", DebugUtil.printId(queryId));
+            }
+            collectProfileSync();
+            task.accept(false);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -991,8 +1084,8 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
-    public RuntimeProfile buildMergedQueryProfile() {
-        return queryProfile.buildMergedQueryProfile();
+    public RuntimeProfile buildQueryProfile(boolean needMerge) {
+        return queryProfile.buildQueryProfile(needMerge);
     }
 
     /**
@@ -1032,6 +1125,11 @@ public class DefaultCoordinator extends Coordinator {
     }
 
     @Override
+    public DataCacheSelectMetrics getDataCacheSelectMetrics() {
+        return queryProfile.getDataCacheSelectMetrics();
+    }
+
+    @Override
     public PQueryStatistics getAuditStatistics() {
         return auditStatistics;
     }
@@ -1044,5 +1142,15 @@ public class DefaultCoordinator extends Coordinator {
     @Override
     public boolean isProfileAlreadyReported() {
         return this.queryProfile.isProfileAlreadyReported();
+    }
+
+    private void execShortCircuit() {
+        shortCircuitExecutor.exec();
+        Optional<RuntimeProfile> runtimeProfile = shortCircuitExecutor.getRuntimeProfile();
+        if (jobSpec.isNeedReport() && runtimeProfile.isPresent()) {
+            RuntimeProfile profile = runtimeProfile.get();
+            profile.setName("Short Circuit Executor");
+            queryProfile.getQueryProfile().addChild(profile);
+        }
     }
 }

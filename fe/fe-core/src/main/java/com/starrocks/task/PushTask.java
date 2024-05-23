@@ -42,8 +42,8 @@ import com.starrocks.analysis.IsNullPredicate;
 import com.starrocks.analysis.LiteralExpr;
 import com.starrocks.analysis.Predicate;
 import com.starrocks.analysis.SlotRef;
-import com.starrocks.common.MarkedCountDownLatch;
 import com.starrocks.common.Status;
+import com.starrocks.common.util.concurrent.MarkedCountDownLatch;
 import com.starrocks.thrift.TBrokerScanRange;
 import com.starrocks.thrift.TColumn;
 import com.starrocks.thrift.TCondition;
@@ -128,11 +128,11 @@ public class PushTask extends AgentTask {
 
     // for load v2 (SparkLoadJob)
     public PushTask(long backendId, long dbId, long tableId, long partitionId, long indexId, long tabletId,
-                    long replicaId, int schemaHash, int timeoutSecond, long loadJobId, TPushType pushType,
+                    long replicaId, int schemaHash, long version, int timeoutSecond, long loadJobId, TPushType pushType,
                     TPriority priority, long transactionId, long signature, TBrokerScanRange tBrokerScanRange,
                     TDescriptorTable tDescriptorTable, String timezone, TTabletType tabletType, List<TColumn> columnsDesc) {
         this(null, backendId, dbId, tableId, partitionId, indexId,
-                tabletId, replicaId, schemaHash, -1, timeoutSecond, loadJobId, pushType, null,
+                tabletId, replicaId, schemaHash, version, timeoutSecond, loadJobId, pushType, null,
                 priority, TTaskType.REALTIME_PUSH, transactionId, signature, columnsDesc);
         this.tBrokerScanRange = tBrokerScanRange;
         this.tDescriptorTable = tDescriptorTable;
@@ -228,7 +228,7 @@ public class PushTask extends AgentTask {
     public void countDownLatch(long backendId, long tabletId, String errMsg) {
         if (this.latch != null) {
             if (latch.markedCountDown(backendId, tabletId, new Status(TStatusCode.INTERNAL_ERROR, errMsg))) {
-                LOG.info("pushTask current latch count: {}. backend: {}, tablet:{}",
+                LOG.debug("pushTask current latch count: {}. backend: {}, tablet:{}",
                         latch.getCount(), backendId, tabletId);
             }
         }

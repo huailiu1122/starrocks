@@ -34,14 +34,18 @@
 
 #pragma once
 
+#include "column_reader.h"
 #include "common/status.h"
+#include "io/shared_buffered_input_stream.h"
 #include "storage/olap_common.h"
+#include "storage/options.h"
+#include "storage/predicate_tree/predicate_tree_fwd.h"
 #include "storage/range.h"
 #include "storage/rowset/common.h"
+#include "types/logical_type.h"
+#include "util/runtime_profile.h"
 
 namespace starrocks {
-
-class CondColumn;
 
 class Column;
 class ColumnAccessPath;
@@ -51,11 +55,13 @@ class ColumnReader;
 class RandomAccessFile;
 
 struct ColumnIteratorOptions {
-    RandomAccessFile* read_file = nullptr;
+    //RandomAccessFile* read_file = nullptr;
+    io::SeekableInputStream* read_file = nullptr;
+    bool is_io_coalesce = false;
     // reader statistics
     OlapReaderStatistics* stats = nullptr;
     bool use_page_cache = false;
-    bool fill_data_cache = true;
+    LakeIOOptions lake_io_opts{.fill_data_cache = true};
 
     // check whether column pages are all dictionary encoding.
     bool check_dict_encoding = false;
@@ -93,18 +99,81 @@ public:
     // then returns false.
     virtual Status seek_to_ordinal(ordinal_t ord) = 0;
 
+    virtual ordinal_t num_rows() const = 0;
+
     virtual Status next_batch(size_t* n, Column* dst) = 0;
 
-    virtual Status next_batch(const SparseRange<>& range, Column* dst) {
-        return Status::NotSupported("ColumnIterator Not Support batch read");
+    virtual Status next_batch(const SparseRange<>& range, Column* dst);
+
+    Status convert_sparse_range_to_io_range(const SparseRange<>& range) {
+        if (auto sharedBufferStream = dynamic_cast<io::SharedBufferedInputStream*>(_opts.read_file);
+            sharedBufferStream == nullptr) {
+            return Status::OK();
+        }
+
+        auto reader = get_column_reader();
+        if (reader == nullptr) {
+            // should't happen
+            LOG(INFO) << "column reader nullptr, filename: " << _opts.read_file->filename();
+            return Status::OK();
+        }
+
+        std::vector<io::SharedBufferedInputStream::IORange> result;
+        std::vector<std::pair<int, int>> page_index;
+        int prev_page_index = -1;
+        for (auto index = 0; index < range.size(); index++) {
+            auto row_start = range[index].begin();
+            auto row_end = range[index].end() - 1;
+            OrdinalPageIndexIterator iter_start;
+            OrdinalPageIndexIterator iter_end;
+            RETURN_IF_ERROR(reader->seek_at_or_before(row_start, &iter_start));
+            RETURN_IF_ERROR(reader->seek_at_or_before(row_end, &iter_end));
+
+            if (prev_page_index == iter_start.page_index()) {
+                // merge page index
+                page_index.back().second = iter_end.page_index();
+            } else {
+                page_index.emplace_back(std::make_pair(iter_start.page_index(), iter_end.page_index()));
+            }
+
+            prev_page_index = iter_end.page_index();
+        }
+
+        for (auto pair : page_index) {
+            OrdinalPageIndexIterator iter_start;
+            OrdinalPageIndexIterator iter_end;
+            RETURN_IF_ERROR(reader->seek_by_page_index(pair.first, &iter_start));
+            RETURN_IF_ERROR(reader->seek_by_page_index(pair.second, &iter_end));
+            auto offset = iter_start.page().offset;
+            auto size = iter_end.page().offset - offset + iter_end.page().size;
+            io::SharedBufferedInputStream::IORange io_range(offset, size);
+            result.emplace_back(io_range);
+        }
+
+        return dynamic_cast<io::SharedBufferedInputStream*>(_opts.read_file)->set_io_ranges(result);
     }
 
     virtual ordinal_t get_current_ordinal() const = 0;
 
-    /// for vectorized engine
+    /// Store the row ranges that satisfy the given predicates into |row_ranges|.
+    /// |pred_relation| is the relation among |predicates|, it can be AND or OR.
     virtual Status get_row_ranges_by_zone_map(const std::vector<const ColumnPredicate*>& predicates,
-                                              const ColumnPredicate* del_predicate, SparseRange<>* row_ranges) = 0;
+                                              const ColumnPredicate* del_predicate, SparseRange<>* row_ranges,
+                                              CompoundNodeType pred_relation) {
+        row_ranges->add({0, static_cast<rowid_t>(num_rows())});
+        return Status::OK();
+    }
 
+    virtual bool has_original_bloom_filter_index() const { return false; }
+    virtual bool has_ngram_bloom_filter_index() const { return false; }
+    /// Treat the relationship between |predicates| as `(s_pred_1 OR s_pred_2 OR ... OR s_pred_n) AND (ns_pred_1 AND ns_pred_2 AND ... AND ns_pred_n)`,
+    /// where s_pred_i denotes a predicate which supports bloom filter, and ns_pred_i denotes a predicate which does not support bloom filter.
+    /// That is,
+    /// - only keep the rows in |row_ranges| which satisfy any predicate that supports bloom filter in |predicates|.
+    /// - or keep all the rows in |row_ranges| if there is no predicate that supports bloom filter in |predicates|.
+    ///
+    /// prerequisite:
+    /// - if the original relationship between |predicates| is OR, all of them need to support bloom filter.
     virtual Status get_row_ranges_by_bloom_filter(const std::vector<const ColumnPredicate*>& predicates,
                                                   SparseRange<>* row_ranges) {
         return Status::OK();
@@ -120,6 +189,10 @@ public:
     virtual Status fetch_all_dict_words(std::vector<Slice>* words) const {
         return Status::NotSupported("Not Support dict.");
     }
+
+    // only work when all_page_dict_encoded was true.
+    // used to acquire load local dict
+    virtual int dict_size() { return 0; }
 
     // return a non-negative dictionary code of |word| if it exist in this segment file,
     // otherwise -1 is returned.
@@ -161,9 +234,8 @@ public:
 
     // given a list of ordinals, fetch corresponding values.
     // |ordinals| must be ascending sorted.
-    virtual Status fetch_values_by_rowid(const rowid_t* rowids, size_t size, Column* values) {
-        return Status::NotSupported("");
-    }
+    // NOTE: The default implementation is not high-performant.
+    virtual Status fetch_values_by_rowid(const rowid_t* rowids, size_t size, Column* values);
 
     Status fetch_values_by_rowid(const Column& rowids, Column* values);
 
@@ -173,7 +245,7 @@ public:
 
     Status fetch_dict_codes_by_rowid(const Column& rowids, Column* values);
 
-    // for complex collection type (Array/Struct/Map)
+    // for Struct type (Struct)
     virtual Status next_batch(size_t* n, Column* dst, ColumnAccessPath* path) { return next_batch(n, dst); }
 
     virtual Status next_batch(const SparseRange<>& range, Column* dst, ColumnAccessPath* path) {
@@ -184,6 +256,7 @@ public:
 
 protected:
     ColumnIteratorOptions _opts;
+    virtual ColumnReader* get_column_reader() { return nullptr; };
 };
 
 } // namespace starrocks

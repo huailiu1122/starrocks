@@ -195,7 +195,27 @@ void JDBCScanner::_init_profile() {
 
 StatusOr<LogicalType> JDBCScanner::_precheck_data_type(const std::string& java_class, SlotDescriptor* slot_desc) {
     auto type = slot_desc->type().type;
-    if (java_class == "java.lang.Short") {
+    if (java_class == "java.lang.Byte") {
+        if (type != TYPE_BOOLEAN && type != TYPE_TINYINT && type != TYPE_SMALLINT && type != TYPE_INT &&
+            type != TYPE_BIGINT) {
+            return Status::NotSupported(
+                    fmt::format("Type mismatches on column[{}], JDBC result type is Byte, please set the type to "
+                                "one of boolean,tinyint,smallint,int,bigint",
+                                slot_desc->col_name()));
+        }
+        if (type == TYPE_BOOLEAN) {
+            return TYPE_BOOLEAN;
+        }
+        return TYPE_TINYINT;
+    } else if (java_class == "com.clickhouse.data.value.UnsignedByte") {
+        if (type != TYPE_SMALLINT && type != TYPE_INT && type != TYPE_BIGINT) {
+            return Status::NotSupported(fmt::format(
+                    "Type mismatches on column[{}], JDBC result type is UnsignedByte, please set the type to "
+                    "one of smallint,int,bigint",
+                    slot_desc->col_name()));
+        }
+        return TYPE_SMALLINT;
+    } else if (java_class == "java.lang.Short") {
         if (type != TYPE_TINYINT && type != TYPE_SMALLINT && type != TYPE_INT && type != TYPE_BIGINT) {
             return Status::NotSupported(
                     fmt::format("Type mismatches on column[{}], JDBC result type is Short, please set the type to "
@@ -203,6 +223,14 @@ StatusOr<LogicalType> JDBCScanner::_precheck_data_type(const std::string& java_c
                                 slot_desc->col_name()));
         }
         return TYPE_SMALLINT;
+    } else if (java_class == "com.clickhouse.data.value.UnsignedShort") {
+        if (type != TYPE_INT && type != TYPE_BIGINT) {
+            return Status::NotSupported(fmt::format(
+                    "Type mismatches on column[{}], JDBC result type is UnsignedShort, please set the type to "
+                    "one of int,bigint",
+                    slot_desc->col_name()));
+        }
+        return TYPE_INT;
     } else if (java_class == "java.lang.Integer") {
         if (type != TYPE_TINYINT && type != TYPE_SMALLINT && type != TYPE_INT && type != TYPE_BIGINT) {
             return Status::NotSupported(
@@ -218,6 +246,13 @@ StatusOr<LogicalType> JDBCScanner::_precheck_data_type(const std::string& java_c
                     slot_desc->col_name()));
         }
         return TYPE_VARCHAR;
+    } else if (java_class == "com.clickhouse.data.value.UnsignedInteger") {
+        if (type != TYPE_BIGINT) {
+            return Status::NotSupported(fmt::format(
+                    "Type mismatches on column[{}], JDBC result type is UnsignedInteger, please set the type to bigint",
+                    slot_desc->col_name()));
+        }
+        return TYPE_BIGINT;
     } else if (java_class == "java.lang.Long") {
         if (type != TYPE_BIGINT) {
             return Status::NotSupported(fmt::format(
@@ -225,6 +260,20 @@ StatusOr<LogicalType> JDBCScanner::_precheck_data_type(const std::string& java_c
                     slot_desc->col_name()));
         }
         return TYPE_BIGINT;
+    } else if (java_class == "java.math.BigInteger") {
+        if (type != TYPE_LARGEINT && type != TYPE_VARCHAR) {
+            return Status::NotSupported(fmt::format(
+                    "Type mismatches on column[{}], JDBC result type is BigInteger, please set the type to largeint",
+                    slot_desc->col_name()));
+        }
+        return TYPE_VARCHAR;
+    } else if (java_class == "com.clickhouse.data.value.UnsignedLong") {
+        if (type != TYPE_LARGEINT) {
+            return Status::NotSupported(fmt::format(
+                    "Type mismatches on column[{}], JDBC result type is UnsignedLong, please set the type to largeint",
+                    slot_desc->col_name()));
+        }
+        return TYPE_VARCHAR;
     } else if (java_class == "java.lang.Boolean") {
         if (type != TYPE_BOOLEAN && type != TYPE_SMALLINT && type != TYPE_INT && type != TYPE_BIGINT) {
             return Status::NotSupported(
@@ -261,10 +310,24 @@ StatusOr<LogicalType> JDBCScanner::_precheck_data_type(const std::string& java_c
                                 slot_desc->col_name()));
         }
         return TYPE_VARCHAR;
+    } else if (java_class == "java.sql.Time") {
+        if (type != TYPE_TIME) {
+            return Status::NotSupported(
+                    fmt::format("Type mismatches on column[{}], JDBC result type is Time, please set the type to time",
+                                slot_desc->col_name()));
+        }
+        return TYPE_TIME;
     } else if (java_class == "java.time.LocalDateTime") {
         if (type != TYPE_DATETIME) {
             return Status::NotSupported(fmt::format(
                     "Type mismatches on column[{}], JDBC result type is LocalDateTime, please set the type to datetime",
+                    slot_desc->col_name()));
+        }
+        return TYPE_VARCHAR;
+    } else if (java_class == "java.time.LocalDate") {
+        if (type != TYPE_DATE) {
+            return Status::NotSupported(fmt::format(
+                    "Type mismatches on column[{}], JDBC result type is LocalDate, please set the type to date",
                     slot_desc->col_name()));
         }
         return TYPE_VARCHAR;
@@ -276,9 +339,38 @@ StatusOr<LogicalType> JDBCScanner::_precheck_data_type(const std::string& java_c
                                 slot_desc->col_name()));
         }
         return TYPE_VARCHAR;
+    } else if (java_class == "oracle.sql.TIMESTAMP") {
+        if (type != TYPE_DATETIME) {
+            return Status::NotSupported(
+                    fmt::format("Type mismatches on column[{}], JDBC result type is oracle Timestamp, please set the "
+                                "type to datetime",
+                                slot_desc->col_name()));
+        }
+        return TYPE_VARCHAR;
+    } else if (java_class == "oracle.sql.TIMESTAMPLTZ") {
+        if (type != TYPE_DATETIME) {
+            return Status::NotSupported(
+                    fmt::format("Type mismatches on column[{}], JDBC result type is oracle Timestamp ltz, please set "
+                                "the type to datetime",
+                                slot_desc->col_name()));
+        }
+        return TYPE_VARCHAR;
+    } else if (java_class == "oracle.sql.TIMESTAMPTZ") {
+        if (type != TYPE_DATETIME) {
+            return Status::NotSupported(
+                    fmt::format("Type mismatches on column[{}], JDBC result type is oracle Timestamp tz, please set "
+                                "the type to datetime",
+                                slot_desc->col_name()));
+        }
+        return TYPE_VARCHAR;
     } else {
-        return Status::NotSupported(fmt::format("Type is not supported on column[{}], JDBC result type is [{}]",
-                                                slot_desc->col_name(), java_class));
+        if (type != TYPE_VARCHAR) {
+            return Status::NotSupported(
+                    fmt::format("JDBC result type of column[{}] is [{}], StarRocks does not recognize it, please set "
+                                "the type of this column to varchar to avoid information loss.",
+                                slot_desc->col_name(), java_class));
+        }
+        return TYPE_VARCHAR;
     }
     __builtin_unreachable();
 }
@@ -396,24 +488,6 @@ Status JDBCScanner::_fill_chunk(jobject jchunk, size_t num_rows, ChunkPtr* chunk
             auto st =
                     helper.get_result_from_boxed_array(_result_column_types[i], result_column.get(), jcolumn, num_rows);
             RETURN_IF_ERROR(st);
-            // check data's length for string type
-            auto origin_type = _slot_descs[i]->type().type;
-            if (origin_type == TYPE_VARCHAR || origin_type == TYPE_CHAR) {
-                DCHECK_EQ(_result_column_types[i], TYPE_VARCHAR);
-                int max_len = _slot_descs[i]->type().len;
-                ColumnViewer<TYPE_VARCHAR> viewer(result_column);
-                for (int row = 0; row < viewer.size(); row++) {
-                    if (viewer.is_null(row)) {
-                        continue;
-                    }
-                    auto value = viewer.value(row);
-                    if ((int)value.size > max_len) {
-                        return Status::DataQualityError(fmt::format(
-                                "Value length exceeds limit on column[{}], max length is [{}], value is [{}]",
-                                _slot_descs[i]->col_name(), max_len, value));
-                    }
-                }
-            }
             down_cast<NullableColumn*>(result_column.get())->update_has_null();
         }
     }

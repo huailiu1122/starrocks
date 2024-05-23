@@ -1,36 +1,3 @@
-[sql]
-select
-        nation,
-        o_year,
-        sum(amount) as sum_profit
-from
-        (
-                select
-                        n_name as nation,
-                        extract(year from o_orderdate) as o_year,
-                        l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity as amount
-                from
-                        part,
-                        supplier,
-                        lineitem,
-                        partsupp,
-                        orders,
-                        nation
-                where
-                        s_suppkey = l_suppkey
-                        and ps_suppkey = l_suppkey
-                        and ps_partkey = l_partkey
-                        and p_partkey = l_partkey
-                        and o_orderkey = l_orderkey
-                        and s_nationkey = n_nationkey
-                        and p_name like '%peru%'
-        ) as profit
-group by
-        nation,
-        o_year
-order by
-        nation,
-        o_year desc ;
 [fragment statistics]
 PLAN FRAGMENT 0(F16)
 Output Exprs:48: n_name | 51: year | 53: sum
@@ -82,7 +49,7 @@ OutPut Exchange Id: 25
 
 24:AGGREGATE (update serialize)
 |  STREAMING
-|  aggregate: sum[([52: expr, DECIMAL128(38,4), true]); args: DECIMAL128; result: DECIMAL128(38,4); args nullable: true; result nullable: true]
+|  aggregate: sum[([52: expr, DECIMAL128(32,4), true]); args: DECIMAL128; result: DECIMAL128(38,4); args nullable: true; result nullable: true]
 |  group by: [48: n_name, VARCHAR, true], [51: year, SMALLINT, true]
 |  cardinality: 98
 |  column statistics:
@@ -94,7 +61,7 @@ OutPut Exchange Id: 25
 |  output columns:
 |  48 <-> [48: n_name, VARCHAR, true]
 |  51 <-> year[([42: o_orderdate, DATE, true]); args: DATE; result: SMALLINT; args nullable: true; result nullable: true]
-|  52 <-> cast([22: l_extendedprice, DECIMAL64(15,2), true] as DECIMAL128(15,2)) * cast(1 - [23: l_discount, DECIMAL64(15,2), true] as DECIMAL128(18,2)) - cast([36: ps_supplycost, DECIMAL64(15,2), true] as DECIMAL128(15,2)) * cast([21: l_quantity, DECIMAL64(15,2), true] as DECIMAL128(15,2))
+|  52 <-> cast([22: l_extendedprice, DECIMAL64(15,2), true] as DECIMAL128(15,2)) * cast(1 - [23: l_discount, DECIMAL64(15,2), true] as DECIMAL128(16,2)) - cast([36: ps_supplycost, DECIMAL64(15,2), true] as DECIMAL128(15,2)) * cast([21: l_quantity, DECIMAL64(15,2), true] as DECIMAL128(15,2))
 |  cardinality: 540034112
 |  column statistics:
 |  * n_name-->[-Infinity, Infinity, 0.0, 25.0, 25.0] ESTIMATE
@@ -105,9 +72,6 @@ OutPut Exchange Id: 25
 |  join op: INNER JOIN (BUCKET_SHUFFLE(S))
 |  equal join conjunct: [19: l_suppkey, INT, true] = [34: ps_suppkey, INT, true]
 |  equal join conjunct: [18: l_partkey, INT, true] = [33: ps_partkey, INT, true]
-|  build runtime filters:
-|  - filter_id = 3, build_expr = (34: ps_suppkey), remote = true
-|  - filter_id = 4, build_expr = (33: ps_partkey), remote = false
 |  output columns: 21, 22, 23, 36, 42, 48
 |  cardinality: 540034112
 |  column statistics:
@@ -167,16 +131,11 @@ OutPut Exchange Id: 25
 |       distribution type: SHUFFLE
 |       partition exprs: [10: s_suppkey, INT, true]
 |       cardinality: 1000000
-|       probe runtime filters:
-|       - filter_id = 3, probe_expr = (10: s_suppkey)
 |
 11:EXCHANGE
 distribution type: SHUFFLE
 partition exprs: [19: l_suppkey, INT, true]
 cardinality: 150009476
-probe runtime filters:
-- filter_id = 3, probe_expr = (19: l_suppkey)
-- filter_id = 4, probe_expr = (18: l_partkey)
 
 PLAN FRAGMENT 3(F13)
 
@@ -369,7 +328,6 @@ cardinality: 600037902
 probe runtime filters:
 - filter_id = 0, probe_expr = (18: l_partkey)
 - filter_id = 2, probe_expr = (19: l_suppkey)
-- filter_id = 3, probe_expr = (19: l_suppkey)
 column statistics:
 * l_orderkey-->[1.0, 6.0E8, 0.0, 8.0, 1.5E8] ESTIMATE
 * l_partkey-->[1.0, 2.0E7, 0.0, 8.0, 2.0E7] ESTIMATE

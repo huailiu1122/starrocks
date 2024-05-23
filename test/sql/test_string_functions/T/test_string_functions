@@ -73,6 +73,23 @@ select split_part(c1, "##", -1) from t1;
 select split_part(c1, "##", -2) from t1;
 select split_part(c1, "##", -3) from t1;
 
+-- name: test_url_extract_host
+select url_extract_host('https://starrocks.com/test/api/v1');
+select url_extract_host('https://starrocks.快速.com/test/api/v1');
+select url_extract_host(NULL);
+select url_extract_host('https://starrocks.com/doc?k1=10&k2=3&k1=100');
+CREATE TABLE IF NOT EXISTS `test_url_extract_host` (
+  `id` varchar(10),
+  `url` varchar(100)
+)
+PROPERTIES(
+  "replication_num" = "1"
+);
+insert into test_url_extract_host(id,url)
+values ('1', 'https://starrocks.com/doc?k1=10&k2=3&k1=100'),
+       ('2', 'https://starrocks.快速.com/doc?k1=10&k2=3&k1=100');
+select url_extract_host(url) from test_url_extract_host;
+
 -- name: test_url_encode
 select url_encode('https://docs.starrocks.io/en-us/latest/quick_start/Deploy');
 select url_encode('https://docs.starrocks数据库.io/en-us/latest/quick_start/Deploy?name=快速');
@@ -112,3 +129,61 @@ select substring_index(c1, ".", 3) from t2;
 select substring_index(c1, ".", -1) from t2;
 select substring_index(c1, ".", -2) from t2;
 select substring_index(c1, ".", -3) from t2;
+
+-- function: crc32
+select crc32("starrocks");
+select crc32("STARROCKS");
+select crc32("中文");
+
+create table crc01(c0 varchar(20), c1 varchar(20), c2 varchar(20))
+        DUPLICATE KEY(c0)
+        DISTRIBUTED BY HASH(c0)
+        BUCKETS 1
+        PROPERTIES('replication_num'='1');
+insert into crc01 values ('hello world', 'com.mysql.com', "镜舟科技");
+select crc32(c0) from crc01;
+select crc32(c1) from crc01;
+select crc32(c2) from crc01;
+
+-- name: test_ngram_search
+-- case1: const/const  normal case
+select ngram_search("chinese","china",4);
+
+select ngram_search("chinese","CHINESE",4);
+select ngram_search_case_insensitive("chinese","CHINESE",4);
+select ngram_search_case_insensitive("CHINESE","chinese",4);
+
+-- case 2:const/const corner case
+select ngram_search("chinese","",4);
+select ngram_search("","chinese",4);
+select ngram_search("","",4);
+-- this is because length("chi") < 4
+select ngram_search("chi","chi",4);
+
+-- case3: column/const
+CREATE TABLE `string_table` (
+  `rowkey` varchar(300) NOT NULL COMMENT ""
+) ENGINE=OLAP 
+DUPLICATE KEY(`rowkey`)
+COMMENT "OLAP"
+DISTRIBUTED BY HASH(`rowkey`) BUCKETS 64
+PROPERTIES (
+    "replication_num" = "1",
+    "bucket_size" = "4294967296",
+    "storage_volume" = "builtin_storage_volume",
+    "enable_persistent_index" = "false",
+    "compression" = "LZ4"
+);
+insert into string_table values
+("000073a7-274f-46bf-bfaf-678868cc26cd"),
+("e6249ba1-5b54-46bf-bfaf-89d69094b757"),
+("93da4b36-5401-46bf-bfa7-2bde65779623"),
+("2548c7aa-d94f-46bf-b0a4-d769f248cbb2"),
+("1bd32347-274f-4a30-93f3-9087594de9cd");
+
+select ngram_search(rowkey,"000073a7-274f-46bf-bfaf-678868cc26cd",4) as a from string_table order by a;
+select ngram_search(rowkey, "e6249ba1-5b54-46bf-bfaf-89d69094b757",4) as a from string_table order by a;
+
+-- case4: only support (column,const) and (const,const)
+select ngram_search("000073a7-274f-46bf-bfaf-678868cc26cd",rowkey,4) from string_table;
+

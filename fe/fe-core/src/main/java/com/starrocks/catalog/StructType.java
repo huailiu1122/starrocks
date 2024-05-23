@@ -317,5 +317,26 @@ public class StructType extends Type {
             return new StructType(structFields, isNamed);
         }
     }
+
+    public String toMysqlDataTypeString() {
+        return "struct";
+    }
+
+    // This implementation is the same as BE schema_columns_scanner.cpp type_to_string
+    public String toMysqlColumnTypeString() {
+        return toSql();
+    }
+
+    @Override
+    protected String toTypeString(int depth) {
+        if (depth >= MAX_NESTING_DEPTH) {
+            return "struct<...>";
+        }
+        ArrayList<String> fieldsSql = Lists.newArrayList();
+        for (StructField f : fields) {
+            fieldsSql.add(f.toTypeString(depth + 1));
+        }
+        return String.format("struct<%s>", Joiner.on(", ").join(fieldsSql));
+    }
 }
 

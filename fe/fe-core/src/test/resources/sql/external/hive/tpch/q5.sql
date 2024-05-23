@@ -1,28 +1,3 @@
-[sql]
-select
-    n_name,
-    sum(l_extendedprice * (1 - l_discount)) as revenue
-from
-    customer,
-    orders,
-    lineitem,
-    supplier,
-    nation,
-    region
-where
-        c_custkey = o_custkey
-  and l_orderkey = o_orderkey
-  and l_suppkey = s_suppkey
-  and c_nationkey = s_nationkey
-  and s_nationkey = n_nationkey
-  and n_regionkey = r_regionkey
-  and r_name = 'AFRICA'
-  and o_orderdate >= date '1995-01-01'
-  and o_orderdate < date '1996-01-01'
-group by
-    n_name
-order by
-    revenue desc ;
 [fragment statistics]
 PLAN FRAGMENT 0(F16)
 Output Exprs:42: n_name | 49: sum
@@ -71,7 +46,7 @@ OutPut Exchange Id: 26
 
 25:AGGREGATE (update serialize)
 |  STREAMING
-|  aggregate: sum[([48: expr, DECIMAL128(33,4), true]); args: DECIMAL128; result: DECIMAL128(38,4); args nullable: true; result nullable: true]
+|  aggregate: sum[([48: expr, DECIMAL128(31,4), true]); args: DECIMAL128; result: DECIMAL128(38,4); args nullable: true; result nullable: true]
 |  group by: [42: n_name, VARCHAR, true]
 |  cardinality: 25
 |  column statistics:
@@ -81,7 +56,7 @@ OutPut Exchange Id: 26
 24:Project
 |  output columns:
 |  42 <-> [42: n_name, VARCHAR, true]
-|  48 <-> cast([23: l_extendedprice, DECIMAL64(15,2), true] as DECIMAL128(15,2)) * cast(1 - [24: l_discount, DECIMAL64(15,2), true] as DECIMAL128(18,2))
+|  48 <-> cast([23: l_extendedprice, DECIMAL64(15,2), true] as DECIMAL128(15,2)) * cast(1 - [24: l_discount, DECIMAL64(15,2), true] as DECIMAL128(16,2))
 |  cardinality: 16391888
 |  column statistics:
 |  * n_name-->[-Infinity, Infinity, 0.0, 25.0, 25.0] ESTIMATE
@@ -92,6 +67,7 @@ OutPut Exchange Id: 26
 |  equal join conjunct: [37: s_nationkey, INT, true] = [4: c_nationkey, INT, true]
 |  equal join conjunct: [18: l_orderkey, INT, true] = [9: o_orderkey, INT, true]
 |  build runtime filters:
+|  - filter_id = 4, build_expr = (4: c_nationkey), remote = false
 |  - filter_id = 5, build_expr = (9: o_orderkey), remote = true
 |  output columns: 23, 24, 42
 |  cardinality: 16391888
@@ -112,6 +88,8 @@ OutPut Exchange Id: 26
 distribution type: SHUFFLE
 partition exprs: [18: l_orderkey, INT, true]
 cardinality: 120007580
+probe runtime filters:
+- filter_id = 4, probe_expr = (37: s_nationkey)
 
 PLAN FRAGMENT 3(F12)
 
@@ -131,6 +109,8 @@ OutPut Exchange Id: 22
 20:HASH JOIN
 |  join op: INNER JOIN (PARTITIONED)
 |  equal join conjunct: [10: o_custkey, INT, true] = [1: c_custkey, INT, true]
+|  build runtime filters:
+|  - filter_id = 3, build_expr = (1: c_custkey), remote = false
 |  output columns: 4, 9
 |  cardinality: 22765073
 |  column statistics:
@@ -148,6 +128,8 @@ OutPut Exchange Id: 22
 distribution type: SHUFFLE
 partition exprs: [10: o_custkey, INT, true]
 cardinality: 22765073
+probe runtime filters:
+- filter_id = 3, probe_expr = (10: o_custkey)
 
 PLAN FRAGMENT 4(F10)
 
@@ -183,7 +165,7 @@ OutPut Exchange Id: 17
 15:HdfsScanNode
 TABLE: orders
 NON-PARTITION PREDICATES: 13: o_orderdate >= '1995-01-01', 13: o_orderdate < '1996-01-01'
-MIN/MAX PREDICATES: 52: o_orderdate >= '1995-01-01', 53: o_orderdate < '1996-01-01'
+MIN/MAX PREDICATES: 13: o_orderdate >= '1995-01-01', 13: o_orderdate < '1996-01-01'
 partitions=1/1
 avgRowSize=20.0
 cardinality: 22765073
@@ -354,7 +336,7 @@ OutPut Exchange Id: 05
 3:HdfsScanNode
 TABLE: region
 NON-PARTITION PREDICATES: 46: r_name = 'AFRICA'
-MIN/MAX PREDICATES: 50: r_name <= 'AFRICA', 51: r_name >= 'AFRICA'
+MIN/MAX PREDICATES: 46: r_name <= 'AFRICA', 46: r_name >= 'AFRICA'
 partitions=1/1
 avgRowSize=10.8
 cardinality: 1

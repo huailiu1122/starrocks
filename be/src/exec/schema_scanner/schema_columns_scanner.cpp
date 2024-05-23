@@ -18,8 +18,8 @@
 
 #include "exec/schema_scanner/schema_helper.h"
 #include "gutil/strings/substitute.h"
+#include "runtime/runtime_state.h"
 #include "runtime/string_value.h"
-#include "types/logical_type.h"
 
 namespace starrocks {
 
@@ -60,9 +60,11 @@ Status SchemaColumnsScanner::start(RuntimeState* state) {
     if (!_is_init) {
         return Status::InternalError("schema columns scanner not inited.");
     }
+    RETURN_IF_ERROR(SchemaScanner::init_schema_scanner_state(state));
     if (_param->without_db_table) {
         return Status::OK();
     }
+
     // get all database
     TGetDbsParams db_params;
     if (nullptr != _param->catalog) {
@@ -82,15 +84,7 @@ Status SchemaColumnsScanner::start(RuntimeState* state) {
         }
     }
 
-    {
-        SCOPED_TIMER(_param->_rpc_timer);
-        if (nullptr != _param->ip && 0 != _param->port) {
-            RETURN_IF_ERROR(SchemaHelper::get_db_names(*(_param->ip), _param->port, db_params, &_db_result));
-        } else {
-            return Status::InternalError("IP or port doesn't exists");
-        }
-    }
-
+    RETURN_IF_ERROR(SchemaHelper::get_db_names(_ss_state, db_params, &_db_result));
     return Status::OK();
 }
 
@@ -136,6 +130,10 @@ std::string SchemaColumnsScanner::to_mysql_data_type_string(TColumnDesc& desc) {
         return "percentile";
     case TPrimitiveType::JSON:
         return "json";
+    case TPrimitiveType::BINARY:
+        return "binary";
+    case TPrimitiveType::VARBINARY:
+        return "varbinary";
     default:
         return "unknown";
     }
@@ -208,6 +206,10 @@ std::string SchemaColumnsScanner::type_to_string(TColumnDesc& desc) {
         return "percentile";
     case TPrimitiveType::JSON:
         return "json";
+    case TPrimitiveType::BINARY:
+        return "binary";
+    case TPrimitiveType::VARBINARY:
+        return "varbinary";
     default:
         return "unknown";
     }
@@ -310,8 +312,12 @@ Status SchemaColumnsScanner::fill_chunk(ChunkPtr* chunk) {
             // DATA_TYPE
             {
                 ColumnPtr column = (*chunk)->get_column_by_slot_id(8);
-                std::string str = to_mysql_data_type_string(_desc_result.columns[_column_index].columnDesc);
-                Slice value(str.c_str(), str.length());
+                std::string value;
+                if (_desc_result.columns[_column_index].columnDesc.__isset.dataType) {
+                    value = _desc_result.columns[_column_index].columnDesc.dataType;
+                } else {
+                    value = to_mysql_data_type_string(_desc_result.columns[_column_index].columnDesc);
+                }
                 fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
             }
             break;
@@ -408,7 +414,12 @@ Status SchemaColumnsScanner::fill_chunk(ChunkPtr* chunk) {
             // COLUMN_TYPE
             {
                 ColumnPtr column = (*chunk)->get_column_by_slot_id(16);
-                std::string value = type_to_string(_desc_result.columns[_column_index].columnDesc);
+                std::string value;
+                if (_desc_result.columns[_column_index].columnDesc.__isset.columnTypeStr) {
+                    value = _desc_result.columns[_column_index].columnDesc.columnTypeStr;
+                } else {
+                    value = type_to_string(_desc_result.columns[_column_index].columnDesc);
+                }
                 fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
             }
             break;
@@ -525,11 +536,7 @@ Status SchemaColumnsScanner::get_new_desc() {
         desc_params.__set_limit(_param->limit);
     }
 
-    if (nullptr != _param->ip && 0 != _param->port) {
-        RETURN_IF_ERROR(SchemaHelper::describe_table(*(_param->ip), _param->port, desc_params, &_desc_result));
-    } else {
-        return Status::InternalError("IP or port doesn't exists");
-    }
+    RETURN_IF_ERROR(SchemaHelper::describe_table(_ss_state, desc_params, &_desc_result));
     _column_index = 0;
 
     return Status::OK();
@@ -558,11 +565,7 @@ Status SchemaColumnsScanner::get_new_table() {
         }
     }
 
-    if (nullptr != _param->ip && 0 != _param->port) {
-        RETURN_IF_ERROR(SchemaHelper::get_table_names(*(_param->ip), _param->port, table_params, &_table_result));
-    } else {
-        return Status::InternalError("IP or port doesn't exists");
-    }
+    RETURN_IF_ERROR(SchemaHelper::get_table_names(_ss_state, table_params, &_table_result));
     _table_index = 0;
     return Status::OK();
 }
@@ -575,7 +578,6 @@ Status SchemaColumnsScanner::get_next(ChunkPtr* chunk, bool* eos) {
         return Status::InternalError("input parameter is nullptr.");
     }
     {
-        SCOPED_TIMER(_param->_rpc_timer);
         // if user query schema meta such as "select * from information_schema.columns limit 10;",
         // in this case, there is no predicate and limit clause is set,we can call the describe_table
         // interface only once, and no longer call get_db_names and get_table_names interface, which

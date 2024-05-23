@@ -71,7 +71,6 @@ public:
 
         // cache settings
         shard_info.cache_info.set_enable_cache(false);
-        shard_info.cache_info.set_ttl_seconds(10);
         shard_info.cache_info.set_async_write_back(false);
 
         shard_info.properties["storageGroup"] = "10010";
@@ -361,8 +360,12 @@ TEST_P(StarletFileSystemTest, test_delete_files) {
 
     EXPECT_OK(fs->path_exists(uri1));
     EXPECT_OK(fs->path_exists(uri2));
-    std::vector<std::string> paths{uri1, uri2};
 
+    std::vector<std::string> paths;
+    EXPECT_OK(fs->delete_files(paths));
+
+    paths.emplace_back(uri1);
+    paths.emplace_back(uri2);
     EXPECT_OK(fs->delete_files(paths));
     EXPECT_TRUE(fs->path_exists(uri1).is_not_found());
     EXPECT_TRUE(fs->path_exists(uri2).is_not_found());
@@ -385,14 +388,13 @@ TEST_P(StarletFileSystemTest, test_delete_files) {
 
     // cache settings
     shard_info.cache_info.set_enable_cache(false);
-    shard_info.cache_info.set_ttl_seconds(10);
     shard_info.cache_info.set_async_write_back(false);
 
     (void)g_worker->add_shard(shard_info);
 
     auto uri3 = build_starlet_uri(shard_info.id, "/f1");
     paths.emplace_back(uri3);
-    EXPECT_ERROR(fs->delete_files(paths));
+    EXPECT_OK(fs->delete_files(paths));
     (void)g_worker->remove_shard(shard_info.id);
 }
 

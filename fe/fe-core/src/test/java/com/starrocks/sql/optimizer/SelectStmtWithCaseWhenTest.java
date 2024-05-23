@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer;
 
 import com.google.common.collect.Lists;
+import com.starrocks.common.FeConstants;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.Assert;
@@ -61,6 +62,7 @@ class SelectStmtWithCaseWhenTest {
         starRocksAssert = new StarRocksAssert();
         starRocksAssert.withDatabase("test").useDatabase("test");
         starRocksAssert.withTable(createTblStmtStr);
+        FeConstants.enablePruneEmptyOutputScan = false;
     }
 
     @ParameterizedTest(name = "sql_{index}: {0}.")
@@ -682,21 +684,41 @@ class SelectStmtWithCaseWhenTest {
                         "if (ship_code >= 1 and ship_code <= 4, 1, 0) as layer1," +
                         "if(ship_code is null or ship_code < 1, 1, 0) as layer2 from t0) " +
                         "select * from tmp where layer2 = 1 and layer0 != 1 and layer1 !=1",
-                        "(13: ship_code IS NULL) OR (13: ship_code < 1), if[([13: ship_code, INT, true] > 4, 1, 0)",
-                        "if[((13: ship_code >= 1) AND (13: ship_code <= 4), 1, 0)"
+                        "(5: ship_code IS NULL) OR (5: ship_code < 1), if[([5: ship_code, INT, true] > 4, 1, 0)",
+                        "if[((5: ship_code >= 1) AND (5: ship_code <= 4), 1, 0)"
                 },
 
                 {"select * from test.t0 where nullif('China', region) = 'China'", "[1: region, VARCHAR, false] != 'China'"},
                 {"select * from test.t0 where nullif('China', region) <> 'China'", "0:EMPTYSET"},
                 {"select * from test.t0 where nullif('China', region) is NULL", "[1: region, VARCHAR, false] = 'China'"},
+                {"select * from test.t0 where (nullif('China', region) is NULL) is NULL",
+                        "0:EMPTYSET"},
+                {"select * from test.t0 where (nullif('China', region) is NULL) is NOT NULL",
+                        "0:OlapScanNode\n" +
+                                "     table: t0, rollup: t0\n" +
+                                "     preAggregation: on"},
                 {"select * from test.t0 where nullif('China', region) is NOT NULL", "[1: region, VARCHAR, false] != 'China'"},
+                {"select * from test.t0 where (nullif('China', region) is NOT NULL) is NULL",
+                        "1: region != 'China' IS NULL"},
+                {"select * from test.t0 where (nullif('China', region) is NOT NULL) is NOT NULL",
+                        "1: region != 'China' IS NOT NULL"},
+
                 {"select * from test.t0 where nullif('China', region) = 'USA'", "0:EMPTYSET"},
                 {"select * from test.t0 where nullif('China', region) <>  'USA'", "[1: region, VARCHAR, false] != 'China'"},
 
                 {"select * from test.t0 where nullif(1, ship_code) = 1", "(5: ship_code != 1) OR (5: ship_code IS NULL)"},
                 {"select * from test.t0 where nullif(1, ship_code) <> 1", "0:EMPTYSET"},
                 {"select * from test.t0 where nullif(1, ship_code) is NULL", "[5: ship_code, INT, true] = 1"},
+                {"select * from test.t0 where (nullif(1, ship_code) is NULL) is NULL", "0:EMPTYSET"},
+                {"select * from test.t0 where (nullif(1, ship_code) is NULL) is NOT NULL",
+                        "0:OlapScanNode\n" +
+                        "     table: t0, rollup: t0\n" +
+                        "     preAggregation: on"},
                 {"select * from test.t0 where nullif(1, ship_code) is NOT NULL", "(5: ship_code != 1) OR (5: ship_code IS NULL)"},
+                {"select * from test.t0 where (nullif(1, ship_code) is NOT NULL) is NULL",
+                        "(5: ship_code != 1) OR (5: ship_code IS NULL)"},
+                {"select * from test.t0 where (nullif(1, ship_code) is NOT NULL) is NOT NULL",
+                        "(5: ship_code != 1) OR (5: ship_code IS NULL)"},
                 {"select * from test.t0 where nullif(1, ship_code) = 2", "0:EMPTYSET"},
                 {"select * from test.t0 where nullif(1, ship_code) <>  2", "(5: ship_code != 1) OR (5: ship_code IS NULL)"},
         };

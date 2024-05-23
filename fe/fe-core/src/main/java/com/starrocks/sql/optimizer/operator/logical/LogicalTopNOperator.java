@@ -14,6 +14,7 @@
 
 package com.starrocks.sql.optimizer.operator.logical;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -22,6 +23,7 @@ import com.starrocks.sql.optimizer.RowOutputInfo;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.Ordering;
 import com.starrocks.sql.optimizer.operator.ColumnOutputInfo;
+import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
 import com.starrocks.sql.optimizer.operator.Projection;
@@ -29,9 +31,12 @@ import com.starrocks.sql.optimizer.operator.SortPhase;
 import com.starrocks.sql.optimizer.operator.TopNType;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.property.DomainProperty;
+import org.apache.commons.collections4.CollectionUtils;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 public class LogicalTopNOperator extends LogicalOperator {
@@ -77,6 +82,7 @@ public class LogicalTopNOperator extends LogicalOperator {
         this.sortPhase = sortPhase;
         this.topNType = topNType;
         this.isSplit = isSplit;
+        Preconditions.checkState(limit != 0);
     }
 
     public SortPhase getSortPhase() {
@@ -101,6 +107,10 @@ public class LogicalTopNOperator extends LogicalOperator {
 
     public long getOffset() {
         return offset;
+    }
+
+    public boolean hasOffset() {
+        return offset != Operator.DEFAULT_OFFSET;
     }
 
     public List<ColumnRefOperator> getPartitionByColumns() {
@@ -140,6 +150,14 @@ public class LogicalTopNOperator extends LogicalOperator {
             entryList.add(new ColumnOutputInfo(ordering.getColumnRef(), ordering.getColumnRef()));
         }
         return new RowOutputInfo(entryList);
+    }
+
+    @Override
+    public DomainProperty deriveDomainProperty(List<OptExpression> inputs) {
+        if (CollectionUtils.isEmpty(inputs)) {
+            return new DomainProperty(Map.of());
+        }
+        return inputs.get(0).getDomainProperty();
     }
 
     @Override

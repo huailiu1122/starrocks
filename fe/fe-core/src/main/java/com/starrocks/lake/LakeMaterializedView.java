@@ -18,6 +18,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.staros.proto.FileCacheInfo;
 import com.staros.proto.FilePathInfo;
+import com.starrocks.alter.AlterJobV2Builder;
 import com.starrocks.catalog.CatalogUtils;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.DistributionInfo;
@@ -52,25 +53,15 @@ public class LakeMaterializedView extends MaterializedView {
 
     private static final Logger LOG = LogManager.getLogger(LakeMaterializedView.class);
 
+    public LakeMaterializedView() {
+        this.type = TableType.CLOUD_NATIVE_MATERIALIZED_VIEW;
+    }
+
     public LakeMaterializedView(long id, long dbId, String mvName, List<Column> baseSchema, KeysType keysType,
                                 PartitionInfo partitionInfo, DistributionInfo defaultDistributionInfo,
                                 MvRefreshScheme refreshScheme) {
         super(id, dbId, mvName, baseSchema, keysType, partitionInfo, defaultDistributionInfo, refreshScheme);
         this.type = TableType.CLOUD_NATIVE_MATERIALIZED_VIEW;
-    }
-
-    private FilePathInfo getDefaultFilePathInfo() {
-        return tableProperty.getStorageInfo().getFilePathInfo();
-    }
-
-    @Override
-    public String getStoragePath() {
-        return getDefaultFilePathInfo().getFullPath();
-    }
-
-    @Override
-    public FilePathInfo getPartitionFilePathInfo() {
-        return getDefaultFilePathInfo();
     }
 
     @Override
@@ -118,9 +109,23 @@ public class LakeMaterializedView extends MaterializedView {
     }
 
     @Override
-    public Runnable delete(boolean replay) {
-        onErase(replay);
-        return replay ? null : new DeleteLakeTableTask(this);
+    public boolean isDeleteRetryable() {
+        return true;
+    }
+
+    @Override
+    public boolean delete(long dbId, boolean replay) {
+        return LakeTableHelper.deleteTable(dbId, this, replay);
+    }
+
+    @Override
+    public boolean deleteFromRecycleBin(long dbId, boolean replay) {
+        return LakeTableHelper.deleteTableFromRecycleBin(dbId, this, replay);
+    }
+
+    @Override
+    public AlterJobV2Builder alterTable() {
+        return LakeTableHelper.alterTable(this);
     }
 
     @Override
@@ -159,12 +164,9 @@ public class LakeMaterializedView extends MaterializedView {
 
         // storage_volume
         StorageVolumeMgr svm = GlobalStateMgr.getCurrentState().getStorageVolumeMgr();
-        String storageVolumeId = svm.getStorageVolumeIdOfTable(id);
-        if (storageVolumeId != null) {
-            String volume = GlobalStateMgr.getCurrentState().getStorageVolumeMgr().getStorageVolumeName(storageVolumeId);
-            sb.append(StatsConstants.TABLE_PROPERTY_SEPARATOR).append(
-                    PropertyAnalyzer.PROPERTIES_STORAGE_VOLUME).append("\" = \"").append(volume).append("\"");
-        }
+        String volume = GlobalStateMgr.getCurrentState().getStorageVolumeMgr().getStorageVolumeNameOfTable(id);
+        sb.append(StatsConstants.TABLE_PROPERTY_SEPARATOR).append(
+                PropertyAnalyzer.PROPERTIES_STORAGE_VOLUME).append("\" = \"").append(volume).append("\"");
     }
 
     @Override
@@ -181,5 +183,13 @@ public class LakeMaterializedView extends MaterializedView {
             return CatalogUtils.addEscapeCharacter(comment);
         }
         return TableType.MATERIALIZED_VIEW.name();
+    }
+
+    @Override
+    public void gsonPostProcess() throws IOException {
+        super.gsonPostProcess();
+        if (getMaxColUniqueId() <= 0) {
+            setMaxColUniqueId(LakeTableHelper.restoreColumnUniqueId(this));
+        }
     }
 }

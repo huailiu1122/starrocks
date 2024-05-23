@@ -20,6 +20,8 @@
 
 namespace starrocks {
 
+class BloomFilter;
+
 class VectorizedFunctionCallExpr final : public Expr {
 public:
     explicit VectorizedFunctionCallExpr(const TExprNode& node);
@@ -28,18 +30,31 @@ public:
 
     Expr* clone(ObjectPool* pool) const override { return pool->add(new VectorizedFunctionCallExpr(*this)); }
 
-protected:
-    Status prepare(RuntimeState* state, ExprContext* context) override;
+    const FunctionDescriptor* get_function_desc() { return _fn_desc; }
 
-    Status open(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override;
+    bool support_ngram_bloom_filter(ExprContext* context) const override;
+    bool ngram_bloom_filter(ExprContext* context, const BloomFilter* bf,
+                            const NgramBloomFilterReaderOptions& reader_options) const override;
+
+protected:
+    [[nodiscard]] Status prepare(RuntimeState* state, ExprContext* context) override;
+
+    [[nodiscard]] Status open(RuntimeState* state, ExprContext* context,
+                              FunctionContext::FunctionStateScope scope) override;
 
     void close(RuntimeState* state, ExprContext* context, FunctionContext::FunctionStateScope scope) override;
 
     bool is_constant() const override;
 
-    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override;
+    [[nodiscard]] StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override;
 
 private:
+    bool split_normal_string_to_ngram(FunctionContext* fn_ctx, const NgramBloomFilterReaderOptions& reader_options,
+                                      NgramBloomFilterState* ngram_state, const std::string& func_name) const;
+
+    bool split_like_string_to_ngram(FunctionContext* fn_ctx, const NgramBloomFilterReaderOptions& reader_options,
+                                    std::vector<Slice>& ngram_set) const;
+
     const FunctionDescriptor* _fn_desc{nullptr};
 
     bool _is_returning_random_value = false;

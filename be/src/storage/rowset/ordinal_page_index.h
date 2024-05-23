@@ -93,6 +93,8 @@ public:
     // REQUIRES: the index data has been successfully `load()`ed into memory.
     OrdinalPageIndexIterator seek_at_or_before(ordinal_t ordinal);
 
+    OrdinalPageIndexIterator seek_by_page_index(int page_index);
+
     // REQUIRES: the index data has been successfully `load()`ed into memory.
     OrdinalPageIndexIterator begin();
 
@@ -111,12 +113,7 @@ public:
 
     bool loaded() const { return invoked(_load_once); }
 
-private:
-    friend OrdinalPageIndexIterator;
-
-    void _reset();
-
-    size_t _mem_usage() const {
+    size_t mem_usage() const {
         if (_num_pages == 0) {
             return sizeof(OrdinalIndexReader);
         } else {
@@ -124,6 +121,18 @@ private:
                    (_num_pages + 1) * sizeof(uint64_t);
         }
     }
+
+    void print_debug_info() {
+        for (int i = 0; i < _num_pages; i++) {
+            LOG(INFO) << "ordinals" << i << _ordinals.get()[i];
+            LOG(INFO) << "pages" << i << _pages.get()[i];
+        }
+    }
+
+private:
+    friend OrdinalPageIndexIterator;
+
+    void _reset();
 
     Status _do_load(const IndexReadOptions& opts, const OrdinalIndexPB& meta, ordinal_t num_values);
 

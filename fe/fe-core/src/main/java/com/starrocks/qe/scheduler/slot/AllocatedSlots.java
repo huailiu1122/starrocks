@@ -32,6 +32,7 @@ public class AllocatedSlots {
             Comparator.comparingLong(LogicalSlot::getExpiredAllocatedTimeMs).thenComparing(LogicalSlot::getSlotId));
     private int totalSlotCount = 0;
     private final Map<Long, Integer> groupIdToSlotCount = new HashMap<>();
+    private final PipelineDriverAllocator pipelineDriverAllocator = new PipelineDriverAllocator();
 
     public int getNumSlots() {
         return totalSlotCount;
@@ -45,6 +46,7 @@ public class AllocatedSlots {
         slots.put(slot.getSlotId(), slot);
         slotsOrderByExpiredTime.add(slot);
 
+        pipelineDriverAllocator.allocate(slot);
         totalSlotCount += slot.getNumPhysicalSlots();
         groupIdToSlotCount.compute(slot.getGroupId(),
                 (k, prevCount) -> prevCount == null ? slot.getNumPhysicalSlots() : prevCount + slot.getNumPhysicalSlots());
@@ -59,6 +61,7 @@ public class AllocatedSlots {
         slotsOrderByExpiredTime.remove(slot);
 
         totalSlotCount -= slot.getNumPhysicalSlots();
+        pipelineDriverAllocator.release(slot);
         groupIdToSlotCount.computeIfPresent(slot.getGroupId(), (k, v) -> v - slot.getNumPhysicalSlots());
 
         return slot;

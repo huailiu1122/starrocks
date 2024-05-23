@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "column/chunk.h"
@@ -96,6 +97,8 @@ public:
     }
 
     bool output_chunk_by_bucket() const override { return _output_chunk_by_bucket; }
+    bool is_asc_hint() const override { return _output_asc_hint; }
+    std::optional<bool> partition_order_hint() const override { return _partition_order_hint; }
 
     const std::vector<ExprContext*>& bucket_exprs() const { return _bucket_exprs; }
 
@@ -166,8 +169,7 @@ private:
     TOlapScanNode _olap_scan_node;
     std::vector<std::unique_ptr<TInternalScanRange>> _scan_ranges;
     TupleDescriptor* _tuple_desc = nullptr;
-    OlapScanConjunctsManager _conjuncts_manager;
-    DictOptimizeParser _dict_optimize_parser;
+    std::unique_ptr<OlapScanConjunctsManager> _conjuncts_manager = nullptr;
     const Schema* _chunk_schema = nullptr;
 
     int32_t _num_scanners = 0;
@@ -201,6 +203,8 @@ private:
 
     bool _sorted_by_keys_per_tablet = false;
     bool _output_chunk_by_bucket = false;
+    bool _output_asc_hint = true;
+    std::optional<bool> _partition_order_hint;
 
     std::vector<ExprContext*> _bucket_exprs;
 
@@ -239,10 +243,13 @@ private:
     RuntimeProfile::Counter* _cached_pages_num_counter = nullptr;
     RuntimeProfile::Counter* _bi_filtered_counter = nullptr;
     RuntimeProfile::Counter* _bi_filter_timer = nullptr;
+    RuntimeProfile::Counter* _gin_filtered_counter = nullptr;
+    RuntimeProfile::Counter* _gin_filtered_timer = nullptr;
     RuntimeProfile::Counter* _pushdown_predicates_counter = nullptr;
     RuntimeProfile::Counter* _rowsets_read_count = nullptr;
     RuntimeProfile::Counter* _segments_read_count = nullptr;
     RuntimeProfile::Counter* _total_columns_data_page_count = nullptr;
+    RuntimeProfile::Counter* _pushdown_access_paths_counter = nullptr;
 };
 
 } // namespace starrocks

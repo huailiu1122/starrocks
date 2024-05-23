@@ -38,10 +38,10 @@ under the License.
         <maven.compiler.target>1.8</maven.compiler.target>
         <hadoop.version>3.3.6</hadoop.version>
         <guava.version>32.0.1-jre</guava.version>
-        <zookeeper.version>3.4.14</zookeeper.version>
+        <zookeeper.version>3.9.1</zookeeper.version>
         <protobuf.version>3.16.3</protobuf.version>
         <thrift.version>0.14.1</thrift.version>
-        <tomcat.version>8.5.88</tomcat.version>
+        <tomcat.version>8.5.96</tomcat.version>
         <log4j.version>2.17.1</log4j.version>
         <jackson.version>2.13.4.2</jackson.version>
     </properties>
@@ -250,13 +250,6 @@ under the License.
             <version>${jackson.version}</version>
         </dependency>
 
-        <!-- https://mvnrepository.com/artifact/org.apache.htrace/htrace-core -->
-        <dependency>
-            <groupId>org.apache.htrace</groupId>
-            <artifactId>htrace-core</artifactId>
-            <version>3.1.0-incubating</version>
-        </dependency>
-
         <!-- https://mvnrepository.com/artifact/junit/junit -->
         <dependency>
             <groupId>junit</groupId>
@@ -346,6 +339,42 @@ under the License.
             <version>${hadoop.version}</version>
         </dependency>
 
+        <!-- https://mvnrepository.com/artifact/com.qcloud.cos/hadoop-cos -->
+        <dependency>
+            <groupId>com.qcloud.cos</groupId>
+            <artifactId>hadoop-cos</artifactId>
+            <version>3.3.0-8.3.7</version>
+        </dependency>
+
+
+        <!-- https://mvnrepository.com/artifact/com.qcloud/cos_api-bundle -->
+        <dependency>
+            <groupId>com.qcloud</groupId>
+            <artifactId>cos_api-bundle</artifactId>
+            <version>5.6.137.2</version>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/com.qcloud/cosn-ranger-interface -->
+        <dependency>
+            <groupId>com.qcloud</groupId>
+            <artifactId>cosn-ranger-interface</artifactId>
+            <version>1.0.5</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/com.qcloud/chdfs_hadoop_plugin_network -->
+        <dependency>
+            <groupId>com.qcloud</groupId>
+            <artifactId>chdfs_hadoop_plugin_network</artifactId>
+            <version>3.5</version>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/com.qcloud/hadoop-ranger-client-for-hadoop -->
+        <dependency>
+            <groupId>com.qcloud</groupId>
+            <artifactId>hadoop-ranger-client-for-hadoop</artifactId>
+            <version>3.3.0-4.1</version>
+        </dependency>
     </dependencies>
 
     <build>

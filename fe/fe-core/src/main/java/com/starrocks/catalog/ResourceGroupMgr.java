@@ -16,12 +16,12 @@ package com.starrocks.catalog;
 
 import com.google.common.base.Preconditions;
 import com.google.gson.annotations.SerializedName;
-import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.common.util.concurrent.FairReentrantReadWriteLock;
 import com.starrocks.persist.ResourceGroupOpEntry;
 import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
@@ -77,7 +77,7 @@ public class ResourceGroupMgr implements Writable {
     private final List<TWorkGroupOp> resourceGroupOps = new ArrayList<>();
     private final Map<Long, Map<Long, TWorkGroup>> activeResourceGroupsPerBe = new HashMap<>();
     private final Map<Long, Long> minVersionPerBe = new HashMap<>();
-    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    private final ReentrantReadWriteLock lock = new FairReentrantReadWriteLock();
 
     private void readLock() {
         lock.readLock().lock();
@@ -142,9 +142,9 @@ public class ResourceGroupMgr implements Writable {
         }
     }
 
-    public List<List<String>> showResourceGroup(ShowResourceGroupStmt stmt) throws AnalysisException {
+    public List<List<String>> showResourceGroup(ShowResourceGroupStmt stmt) {
         if (stmt.getName() != null && !resourceGroupMap.containsKey(stmt.getName())) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERROR_NO_RG_ERROR, stmt.getName());
+            ErrorReport.reportSemanticException(ErrorCode.ERROR_NO_RG_ERROR, stmt.getName());
         }
 
         List<List<String>> rows;
@@ -246,7 +246,7 @@ public class ResourceGroupMgr implements Writable {
 
     @Override
     public void write(DataOutput out) throws IOException {
-        List<ResourceGroup> resourceGroups = resourceGroupMap.values().stream().collect(Collectors.toList());
+        List<ResourceGroup> resourceGroups = new ArrayList<>(resourceGroupMap.values());
         SerializeData data = new SerializeData();
         data.resourceGroups = resourceGroups;
 
@@ -379,6 +379,11 @@ public class ResourceGroupMgr implements Writable {
                 Integer concurrentLimit = changedProperties.getConcurrencyLimit();
                 if (concurrentLimit != null) {
                     wg.setConcurrencyLimit(concurrentLimit);
+                }
+
+                Double spillMemLimitThreshold = changedProperties.getSpillMemLimitThreshold();
+                if (spillMemLimitThreshold != null) {
+                    wg.setSpillMemLimitThreshold(spillMemLimitThreshold);
                 }
 
                 // Type is guaranteed to be immutable during the analyzer phase.
@@ -560,21 +565,24 @@ public class ResourceGroupMgr implements Writable {
         try {
             String user = getUnqualifiedUser(ctx);
             String remoteIp = ctx.getRemoteIP();
+            final double planCpuCost = ctx.getAuditEventBuilder().build().planCpuCosts;
+            final double planMemCost = ctx.getAuditEventBuilder().build().planMemCosts;
 
             // check short query first
             if (shortQueryResourceGroup != null) {
-                List<ResourceGroupClassifier> shortQueryClassifierList =
-                        shortQueryResourceGroup.classifiers.stream().filter(
-                                        f -> f.isSatisfied(user, activeRoles, queryType, remoteIp, databases))
-                                .sorted(Comparator.comparingDouble(ResourceGroupClassifier::weight))
-                                .collect(Collectors.toList());
+                List<ResourceGroupClassifier> shortQueryClassifierList = shortQueryResourceGroup.classifiers.stream()
+                        .filter(f -> f.isSatisfied(user, activeRoles, queryType, remoteIp, databases, planCpuCost, planMemCost))
+                        .sorted(Comparator.comparingDouble(ResourceGroupClassifier::weight))
+                        .collect(Collectors.toList());
                 if (!shortQueryClassifierList.isEmpty()) {
                     return shortQueryResourceGroup.toThrift();
                 }
             }
 
             List<ResourceGroupClassifier> classifierList =
-                    classifierMap.values().stream().filter(f -> f.isSatisfied(user, activeRoles, queryType, remoteIp, databases))
+                    classifierMap.values().stream()
+                            .filter(f -> f.isSatisfied(user, activeRoles, queryType, remoteIp, databases, planCpuCost,
+                                    planMemCost))
                             .sorted(Comparator.comparingDouble(ResourceGroupClassifier::weight))
                             .collect(Collectors.toList());
             if (classifierList.isEmpty()) {

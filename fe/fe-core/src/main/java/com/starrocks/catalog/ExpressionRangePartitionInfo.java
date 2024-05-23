@@ -20,6 +20,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.annotations.SerializedName;
+import com.starrocks.analysis.CastExpr;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.FunctionCallExpr;
 import com.starrocks.analysis.SlotRef;
@@ -31,23 +32,35 @@ import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.SqlModeHelper;
 import com.starrocks.sql.analyzer.AnalyzerUtils;
 import com.starrocks.sql.analyzer.PartitionExprAnalyzer;
+import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.AstVisitor;
 import com.starrocks.sql.parser.SqlParser;
+import org.apache.commons.collections4.map.CaseInsensitiveMap;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.parquet.Strings;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
 
 /**
  * ExpressionRangePartitionInfo replace columns with expressions
  * Some Descriptions:
  * 1. no overwrite old serialized method: read、write and readFields, because we use gson now
+ * 2. As of 2023-09, it's still used to describe auto range using expr like PARTITION BY date_trunc('day', col).
  */
 @Deprecated
 public class ExpressionRangePartitionInfo extends RangePartitionInfo implements GsonPreProcessable, GsonPostProcessable {
+
+    private static final Logger LOG = LogManager.getLogger(ExpressionRangePartitionInfo.class);
+
     public static final String AUTOMATIC_SHADOW_PARTITION_NAME = "$shadow_automatic_partition";
     public static final String SHADOW_PARTITION_PREFIX = "$";
 
@@ -82,18 +95,33 @@ public class ExpressionRangePartitionInfo extends RangePartitionInfo implements 
             }
         }
 
+        // Analyze partition expr
+        Map<String, Column> partitionNameColumnMap = partitionColumns.stream()
+                .collect(toMap(x -> x.getName(), Function.identity(), (e1, e2) -> e1, CaseInsensitiveMap::new));
+        SlotRef slotRef;
         for (Expr expr : partitionExprs) {
             if (expr instanceof FunctionCallExpr) {
-                SlotRef slotRef = AnalyzerUtils.getSlotRefFromFunctionCall(expr);
-                // TODO: Later, for automatically partitioned tables,
-                //  partitions of materialized views (also created automatically),
-                //  and partition by expr tables will use ExpressionRangePartitionInfoV2
-                for (Column partitionColumn : partitionColumns) {
-                    if (slotRef.getColumnName().equalsIgnoreCase(partitionColumn.getName())) {
-                        slotRef.setType(partitionColumn.getType());
-                        slotRef.setNullable(partitionColumn.isAllowNull());
-                        PartitionExprAnalyzer.analyzePartitionExpr(expr, slotRef);
-                    }
+                slotRef = AnalyzerUtils.getSlotRefFromFunctionCall(expr);
+            } else if (expr instanceof CastExpr) {
+                slotRef = AnalyzerUtils.getSlotRefFromCast(expr);
+            } else if (expr instanceof SlotRef) {
+                slotRef = (SlotRef) expr;
+            } else {
+                LOG.warn("Unknown expr type: {}", expr.toSql());
+                continue;
+            }
+
+            // TODO: Later, for automatically partitioned tables,
+            //  partitions of materialized views (also created automatically),
+            //  and partition by expr tables will use ExpressionRangePartitionInfoV2
+            if (partitionNameColumnMap.containsKey(slotRef.getColumnName())) {
+                Column partitionColumn = partitionNameColumnMap.get(slotRef.getColumnName());
+                slotRef.setType(partitionColumn.getType());
+                slotRef.setNullable(partitionColumn.isAllowNull());
+                try {
+                    PartitionExprAnalyzer.analyzePartitionExpr(expr, slotRef);
+                } catch (SemanticException ex) {
+                    LOG.warn("Failed to analyze partition expr: {}", expr.toSql(), ex);
                 }
             }
         }
@@ -174,7 +202,11 @@ public class ExpressionRangePartitionInfo extends RangePartitionInfo implements 
                     if (slotRef.getColumnName().equalsIgnoreCase(partitionColumn.getName())) {
                         slotRef.setType(partitionColumn.getType());
                         slotRef.setNullable(partitionColumn.isAllowNull());
-                        PartitionExprAnalyzer.analyzePartitionExpr(expr, slotRef);
+                        try {
+                            PartitionExprAnalyzer.analyzePartitionExpr(expr, slotRef);
+                        } catch (SemanticException ex) {
+                            LOG.warn("Failed to analyze partition expr: {}", expr.toSql(), ex);
+                        }
                     }
                 }
             }
@@ -197,7 +229,13 @@ public class ExpressionRangePartitionInfo extends RangePartitionInfo implements 
         Text.writeString(out, GsonUtils.GSON.toJson(serializedPartitionExprs));
     }
 
-    public void renameTableName(String newTableName) {
+    /**
+     * Do actions when rename referred table's db or table name.
+     * @param dbName        : new db name which can be null or empty and will be not updated then.
+     * @param newTableName  : new table name which must be not null or empty.
+     */
+    public void renameTableName(String dbName, String newTableName) {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(newTableName));
         AstVisitor<Void, Void> renameVisitor = new AstVisitor<Void, Void>() {
             @Override
             public Void visitExpression(Expr expr, Void context) {
@@ -211,6 +249,9 @@ public class ExpressionRangePartitionInfo extends RangePartitionInfo implements 
             public Void visitSlot(SlotRef node, Void context) {
                 TableName tableName = node.getTblNameWithoutAnalyzed();
                 if (tableName != null) {
+                    if (!Strings.isNullOrEmpty(dbName)) {
+                        tableName.setDb(dbName);
+                    }
                     tableName.setTbl(newTableName);
                 }
                 return null;

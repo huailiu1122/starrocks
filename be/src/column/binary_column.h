@@ -35,18 +35,19 @@ public:
 
     using Bytes = starrocks::raw::RawVectorPad16<uint8_t>;
 
-    using Container = Buffer<Slice>;
-
     struct BinaryDataProxyContainer {
         BinaryDataProxyContainer(const BinaryColumnBase& column) : _column(column) {}
 
         Slice operator[](size_t index) const { return _column.get_slice(index); }
 
-        size_t size() { return _column.size(); }
+        size_t size() const { return _column.size(); }
 
     private:
         const BinaryColumnBase& _column;
     };
+
+    using Container = Buffer<Slice>;
+    using ProxyContainer = BinaryDataProxyContainer;
 
     // TODO(kks): when we create our own vector, we could let vector[-1] = 0,
     // and then we don't need explicitly emplace_back zero value
@@ -85,6 +86,14 @@ public:
     bool has_large_column() const override;
 
     ~BinaryColumnBase() override {
+#ifndef NDEBUG
+        // sometimes we may fill _bytes and _offsets separately and resize them in the final stage,
+        // if an exception is thrown in the middle process, _offsets maybe inconsistent with _bytes,
+        // we should skip the check.
+        if (std::uncaught_exception()) {
+            return;
+        }
+#endif
         if (!_offsets.empty()) {
             DCHECK_EQ(_bytes.size(), _offsets.back());
         } else {
@@ -179,7 +188,7 @@ public:
 
     void append_selective(const Column& src, const uint32_t* indexes, uint32_t from, uint32_t size) override;
 
-    void append_value_multiple_times(const Column& src, uint32_t index, uint32_t size, bool deep_copy) override;
+    void append_value_multiple_times(const Column& src, uint32_t index, uint32_t size) override;
 
     bool append_nulls(size_t count) override { return false; }
 
@@ -248,7 +257,7 @@ public:
 
     int64_t xor_checksum(uint32_t from, uint32_t to) const override;
 
-    void put_mysql_row_buffer(MysqlRowBuffer* buf, size_t idx) const override;
+    void put_mysql_row_buffer(MysqlRowBuffer* buf, size_t idx, bool is_binary_protocol = false) const override;
 
     std::string get_name() const override {
         static_assert(std::is_same_v<T, uint32_t> || std::is_same_v<T, uint64_t>);

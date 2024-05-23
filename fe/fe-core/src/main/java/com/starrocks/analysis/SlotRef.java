@@ -52,7 +52,6 @@ import com.starrocks.sql.ast.QualifiedName;
 import com.starrocks.thrift.TExprNode;
 import com.starrocks.thrift.TExprNodeType;
 import com.starrocks.thrift.TSlotRef;
-import org.apache.arrow.util.VisibleForTesting;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -278,7 +277,7 @@ public class SlotRef extends Expr {
     @Override
     public String toSqlImpl() {
         StringBuilder sb = new StringBuilder();
-        if (tblName != null) {
+        if (tblName != null && !isFromLambda()) {
             return tblName.toSql() + "." + "`" + col + "`";
         } else if (label != null) {
             return label;
@@ -316,11 +315,11 @@ public class SlotRef extends Expr {
     }
 
     @Override
-    public String toJDBCSQL(boolean isMySQL) {
+    public String toJDBCSQL() {
         if (label == null) {
             throw new IllegalArgumentException("should set label for cols in JDBCScanNode. SlotRef: " + debugString());
         }
-        return isMySQL ? "`" + label + "`" : label;
+        return label;
     }
 
     public TableName getTableName() {
@@ -429,6 +428,9 @@ public class SlotRef extends Expr {
     @Override
     public boolean isBoundByTupleIds(List<TupleId> tids) {
         Preconditions.checkState(desc != null);
+        if (isFromLambda()) {
+            return true;
+        }
         for (TupleId tid : tids) {
             if (tid.equals(desc.getParent().getId())) {
                 return true;

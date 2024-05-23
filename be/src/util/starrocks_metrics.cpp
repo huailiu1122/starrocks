@@ -54,8 +54,30 @@ StarRocksMetrics::StarRocksMetrics() : _metrics(_s_registry_name) {
     REGISTER_STARROCKS_METRIC(query_scan_bytes);
     REGISTER_STARROCKS_METRIC(query_scan_rows);
 
+    REGISTER_STARROCKS_METRIC(load_channel_add_chunks_total);
+    REGISTER_STARROCKS_METRIC(load_channel_add_chunks_duration_us);
+    REGISTER_STARROCKS_METRIC(load_channel_add_chunks_wait_memtable_duration_us);
+    REGISTER_STARROCKS_METRIC(load_channel_add_chunks_wait_writer_duration_us);
+    REGISTER_STARROCKS_METRIC(load_channel_add_chunks_wait_replica_duration_us);
+
+    REGISTER_STARROCKS_METRIC(async_delta_writer_execute_total);
+    REGISTER_STARROCKS_METRIC(async_delta_writer_task_total);
+    REGISTER_STARROCKS_METRIC(async_delta_writer_task_execute_duration_us);
+    REGISTER_STARROCKS_METRIC(async_delta_writer_task_pending_duration_us);
+
+    REGISTER_STARROCKS_METRIC(delta_writer_wait_flush_duration_us);
+    REGISTER_STARROCKS_METRIC(delta_writer_wait_replica_duration_us);
+
     REGISTER_STARROCKS_METRIC(memtable_flush_total);
+    REGISTER_STARROCKS_METRIC(memtable_finalize_duration_us);
     REGISTER_STARROCKS_METRIC(memtable_flush_duration_us);
+    REGISTER_STARROCKS_METRIC(memtable_flush_io_time_us);
+    REGISTER_STARROCKS_METRIC(memtable_flush_memory_bytes_total);
+    REGISTER_STARROCKS_METRIC(memtable_flush_disk_bytes_total);
+    REGISTER_STARROCKS_METRIC(segment_flush_total);
+    REGISTER_STARROCKS_METRIC(segment_flush_duration_us);
+    REGISTER_STARROCKS_METRIC(segment_flush_io_time_us);
+    REGISTER_STARROCKS_METRIC(segment_flush_bytes_total);
 
     REGISTER_STARROCKS_METRIC(update_rowset_commit_request_total);
     REGISTER_STARROCKS_METRIC(update_rowset_commit_request_failed);
@@ -116,6 +138,8 @@ StarRocksMetrics::StarRocksMetrics() : _metrics(_s_registry_name) {
     REGISTER_ENGINE_REQUEST_METRIC(base_compaction, failed, base_compaction_request_failed);
     REGISTER_ENGINE_REQUEST_METRIC(cumulative_compaction, total, cumulative_compaction_request_total);
     REGISTER_ENGINE_REQUEST_METRIC(cumulative_compaction, failed, cumulative_compaction_request_failed);
+    REGISTER_ENGINE_REQUEST_METRIC(update_compaction, total, update_compaction_request_total);
+    REGISTER_ENGINE_REQUEST_METRIC(update_compaction, failed, update_compaction_request_failed);
 
     REGISTER_ENGINE_REQUEST_METRIC(publish, total, publish_task_request_total);
     REGISTER_ENGINE_REQUEST_METRIC(publish, failed, publish_task_failed_total);
@@ -174,6 +198,18 @@ StarRocksMetrics::StarRocksMetrics() : _metrics(_s_registry_name) {
     REGISTER_STARROCKS_METRIC(tablet_cumulative_max_compaction_score);
     REGISTER_STARROCKS_METRIC(tablet_base_max_compaction_score);
     REGISTER_STARROCKS_METRIC(tablet_update_max_compaction_score);
+    REGISTER_STARROCKS_METRIC(max_tablet_rowset_num);
+    REGISTER_STARROCKS_METRIC(wait_cumulative_compaction_task_num);
+    REGISTER_STARROCKS_METRIC(wait_base_compaction_task_num);
+    REGISTER_STARROCKS_METRIC(running_cumulative_compaction_task_num);
+    REGISTER_STARROCKS_METRIC(running_base_compaction_task_num);
+    REGISTER_STARROCKS_METRIC(running_update_compaction_task_num);
+    REGISTER_STARROCKS_METRIC(cumulative_compaction_task_cost_time_ms);
+    REGISTER_STARROCKS_METRIC(base_compaction_task_cost_time_ms);
+    REGISTER_STARROCKS_METRIC(update_compaction_task_cost_time_ns);
+    REGISTER_STARROCKS_METRIC(base_compaction_task_byte_per_second);
+    REGISTER_STARROCKS_METRIC(cumulative_compaction_task_byte_per_second);
+    REGISTER_STARROCKS_METRIC(update_compaction_task_byte_per_second);
 
     REGISTER_STARROCKS_METRIC(push_request_write_bytes_per_second);
     REGISTER_STARROCKS_METRIC(query_scan_bytes_per_second);
@@ -192,6 +228,9 @@ StarRocksMetrics::StarRocksMetrics() : _metrics(_s_registry_name) {
     REGISTER_STARROCKS_METRIC(disk_sync_total);
     REGISTER_STARROCKS_METRIC(blocks_open_reading);
     REGISTER_STARROCKS_METRIC(blocks_open_writing);
+
+    REGISTER_STARROCKS_METRIC(short_circuit_request_total);
+    REGISTER_STARROCKS_METRIC(short_circuit_request_duration_us);
 }
 
 void StarRocksMetrics::initialize(const std::vector<std::string>& paths, bool init_system_metrics,

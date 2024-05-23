@@ -40,6 +40,8 @@ import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.proto.PScalarType;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SessionVariableConstants;
 import com.starrocks.thrift.TColumnType;
 import com.starrocks.thrift.TPrimitiveType;
 import com.starrocks.thrift.TScalarType;
@@ -67,7 +69,8 @@ public class ScalarType extends Type implements Cloneable {
     public static final int DEFAULT_SCALE = 0; // SQL standard
     // Longest supported VARCHAR and CHAR, chosen to match Hive.
     public static final int DEFAULT_STRING_LENGTH = 65533;
-    public static final int MAX_VARCHAR_LENGTH = 1048576;
+    // 1GB for each line, it's enough
+    public static final int CATALOG_MAX_VARCHAR_LENGTH = 1024 * 1024 * 1024;
     public static final int MAX_CHAR_LENGTH = 255;
     // HLL DEFAULT LENGTH  2^14(registers) + 1(type)
     public static final int MAX_HLL_LENGTH = 16385;
@@ -77,7 +80,6 @@ public class ScalarType extends Type implements Cloneable {
     // Only used for type CHAR.
     @SerializedName(value = "len")
     private int len = -1;
-    private boolean isAssignedStrLenInColDefinition = false;
 
     // Only used if type is DECIMAL. -1 (for both) is used to represent a
     // decimal with any precision and scale.
@@ -178,12 +180,14 @@ public class ScalarType extends Type implements Cloneable {
     /**
      * Unified decimal is used for parser, which creating default decimal from name
      */
-    public static ScalarType createUnifiedDecimalType() throws AnalysisException {
-        throw decimalParseError("both precision and scale are absent");
+    public static ScalarType createUnifiedDecimalType() {
+        // for mysql compatibility
+        return createUnifiedDecimalType(10, 0);
     }
 
-    public static ScalarType createUnifiedDecimalType(int precision) throws AnalysisException {
-        throw decimalParseError("scale is absent");
+    public static ScalarType createUnifiedDecimalType(int precision) {
+        // for mysql compatibility
+        return createUnifiedDecimalType(precision, 0);
     }
 
     public static ScalarType createUnifiedDecimalType(int precision, int scale) {
@@ -214,11 +218,28 @@ public class ScalarType extends Type implements Cloneable {
     }
 
     public static ScalarType createDecimalV3Type(PrimitiveType type, int precision, int scale) {
-        Preconditions.checkArgument(0 <= precision && precision <= PrimitiveType.getMaxPrecisionOfDecimal(type),
-                "DECIMAL's precision should range from 1 to 38");
-        Preconditions.checkArgument(0 <= scale && scale <= precision,
-                "DECIMAL(P[,S]) type P must be greater than or equal to the value of S");
-
+        int maxPrecision = PrimitiveType.getMaxPrecisionOfDecimal(PrimitiveType.DECIMAL128);
+        ConnectContext ctx = ConnectContext.get();
+        if (ctx == null ||
+                ctx.getSessionVariable() == null ||
+                ctx.getSessionVariable().getLargeDecimalUnderlyingType() == null ||
+                ctx.getSessionVariable().getLargeDecimalUnderlyingType().equals(SessionVariableConstants.PANIC)) {
+            Preconditions.checkArgument(0 <= precision &&
+                            precision <= PrimitiveType.getMaxPrecisionOfDecimal(type),
+                    "DECIMAL's precision should range from 1 to %s",
+                    PrimitiveType.getMaxPrecisionOfDecimal(type));
+            Preconditions.checkArgument(0 <= scale && scale <= precision,
+                    "DECIMAL(P[,S]) type P must be greater than or equal to the value of S");
+        }
+        if (precision > maxPrecision) {
+            String underlyingType = ConnectContext.get().getSessionVariable().getLargeDecimalUnderlyingType();
+            if (underlyingType.equals(SessionVariableConstants.DOUBLE)) {
+                return ScalarType.DOUBLE;
+            } else {
+                precision = maxPrecision;
+                type = PrimitiveType.DECIMAL128;
+            }
+        }
         ScalarType scalarType = new ScalarType(type);
         scalarType.precision = Math.max(precision, 1);
         scalarType.scale = scale;
@@ -284,22 +305,22 @@ public class ScalarType extends Type implements Cloneable {
         }
     }
 
+    public static int getOlapMaxVarcharLength() {
+        return Config.max_varchar_length;
+    }
+
     public static ScalarType createDefaultString() {
         ScalarType stringType = ScalarType.createVarcharType(ScalarType.DEFAULT_STRING_LENGTH);
-        stringType.setAssignedStrLenInColDefinition();
         return stringType;
     }
 
     // Use for Hive string now.
-    public static ScalarType createDefaultExternalTableString() {
-        ScalarType stringType = ScalarType.createVarcharType(ScalarType.MAX_VARCHAR_LENGTH);
-        stringType.setAssignedStrLenInColDefinition();
-        return stringType;
+    public static ScalarType createDefaultCatalogString() {
+        return ScalarType.createVarcharType(CATALOG_MAX_VARCHAR_LENGTH);
     }
 
-    public static ScalarType createMaxVarcharType() {
-        ScalarType stringType = ScalarType.createVarcharType(ScalarType.MAX_VARCHAR_LENGTH);
-        stringType.setAssignedStrLenInColDefinition();
+    public static ScalarType createOlapMaxVarcharType() {
+        ScalarType stringType = ScalarType.createVarcharType(ScalarType.getOlapMaxVarcharLength());
         return stringType;
     }
 
@@ -560,13 +581,10 @@ public class ScalarType extends Type implements Cloneable {
                 }
                 break;
             case DECIMALV2:
-                stringBuilder.append("decimal").append("(").append(precision).append(", ").append(scale).append(")");
-                break;
             case DECIMAL32:
             case DECIMAL64:
             case DECIMAL128:
-                stringBuilder.append(type.toString().toLowerCase()).append("(").append(precision).append(", ")
-                        .append(scale).append(")");
+                stringBuilder.append("decimal").append("(").append(precision).append(", ").append(scale).append(")");
                 break;
             case BOOLEAN:
                 return "boolean";
@@ -586,6 +604,7 @@ public class ScalarType extends Type implements Cloneable {
             case DATETIME:
             case HLL:
             case BITMAP:
+            case BINARY:
             case PERCENTILE:
             case JSON:
             case FUNCTION:
@@ -707,14 +726,6 @@ public class ScalarType extends Type implements Cloneable {
         this.len = len;
     }
 
-    public boolean isAssignedStrLenInColDefinition() {
-        return isAssignedStrLenInColDefinition;
-    }
-
-    public void setAssignedStrLenInColDefinition() {
-        this.isAssignedStrLenInColDefinition = true;
-    }
-
     // add scalar infix to override with getPrecision
     public int getScalarScale() {
         return scale;
@@ -744,11 +755,6 @@ public class ScalarType extends Type implements Cloneable {
     public boolean isSupported() {
         // BINARY and UNKNOWN_TYPE is unsupported
         return type != PrimitiveType.BINARY && type != PrimitiveType.UNKNOWN_TYPE;
-    }
-
-    @Override
-    public int getSlotSize() {
-        return type.getSlotSize();
     }
 
     @Override
@@ -836,5 +842,54 @@ public class ScalarType extends Type implements Cloneable {
         } else {
             return toString();
         }
+    }
+
+    // This implementation is the same as BE schema_columns_scanner.cpp to_mysql_data_type_string
+    public String toMysqlDataTypeString() {
+        switch (type) {
+            case BOOLEAN:
+                return "tinyint";
+            case LARGEINT:
+                return "bigint unsigned";
+            case DECIMAL32:
+            case DECIMAL64:
+            case DECIMAL128:
+            case DECIMALV2:
+                return "decimal";
+            default:
+                return type.toString().toLowerCase();
+        }
+    }
+
+    // This implementation is the same as BE schema_columns_scanner.cpp type_to_string
+    public String toMysqlColumnTypeString() {
+        switch (type) {
+            case BOOLEAN:
+                return "tinyint(1)";
+            case LARGEINT:
+                return "bigint(20) unsigned";
+            default:
+                return toSql();
+        }
+    }
+
+    @Override
+    protected String toTypeString(int depth) {
+        StringBuilder stringBuilder = new StringBuilder();
+        switch (type) {
+            case DECIMALV2:
+                stringBuilder.append("decimal").append("(").append(precision).append(", ").append(scale).append(")");
+                break;
+            case DECIMAL32:
+            case DECIMAL64:
+            case DECIMAL128:
+                stringBuilder.append(type.toString().toLowerCase()).append("(").append(precision).append(", ")
+                        .append(scale).append(")");
+                break;
+            default:
+                stringBuilder.append(type.toString().toLowerCase());
+                break;
+        }
+        return stringBuilder.toString();
     }
 }

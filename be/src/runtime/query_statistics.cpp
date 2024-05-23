@@ -55,7 +55,7 @@ void QueryStatistics::to_pb(PQueryStatistics* statistics) {
     }
 }
 
-void QueryStatistics::to_params(TReportAuditStatisticsParams* params) {
+void QueryStatistics::to_params(TAuditStatistics* params) {
     DCHECK(params != nullptr);
     params->__set_scan_rows(scan_rows);
     params->__set_scan_bytes(scan_bytes);
@@ -124,6 +124,7 @@ void QueryStatistics::merge(int sender_id, QueryStatistics& other) {
     int64_t cpu_ns = other.cpu_ns.load();
     if (other.cpu_ns.compare_exchange_strong(cpu_ns, 0)) {
         this->cpu_ns += cpu_ns;
+        DCHECK(this->cpu_ns >= 0);
     }
 
     int64_t mem_cost_bytes = other.mem_cost_bytes.load();
@@ -156,6 +157,7 @@ void QueryStatistics::merge_pb(const PQueryStatistics& statistics) {
     }
     if (statistics.has_cpu_cost_ns()) {
         cpu_ns += statistics.cpu_cost_ns();
+        DCHECK(cpu_ns >= 0);
     }
     if (statistics.has_spill_bytes()) {
         spill_bytes += statistics.spill_bytes();

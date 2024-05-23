@@ -19,14 +19,15 @@
 #include <starlet.h>
 #include <worker.h>
 
-#include "absl/strings/str_format.h"
 #include "common/config.h"
+#include "common/gflags_utils.h"
 #include "common/logging.h"
+#include "common/shutdown_hook.h"
 #include "file_store.pb.h"
 #include "fmt/format.h"
 #include "fslib/star_cache_configuration.h"
+#include "fslib/star_cache_handler.h"
 #include "gflags/gflags.h"
-#include "gutil/strings/fastmem.h"
 #include "util/await.h"
 #include "util/debug_util.h"
 #include "util/lru_cache.h"
@@ -42,6 +43,10 @@ DECLARE_int32(cachemgr_evict_interval);
 DECLARE_double(cachemgr_evict_low_water);
 // cache will stop evict cache files if free space is above this value(percentage)
 DECLARE_double(cachemgr_evict_high_water);
+// cache will evict file cache at this percent if star cache is turned on
+DECLARE_double(cachemgr_evict_percent);
+// cache will evict file cache at this speed if star cache is turned on
+DECLARE_int32(cachemgr_evict_throughput_mb);
 // type:Integer. CacheManager cache directory allocation policy. (0:default, 1:random, 2:round-robin)
 DECLARE_int32(cachemgr_dir_allocate_policy);
 // buffer size in starlet fs buffer stream, size <= 0 means not use buffer stream.
@@ -54,6 +59,9 @@ DECLARE_int32(fslib_s3client_max_items);
 DECLARE_int32(fslib_s3client_max_connections);
 // s3client max instances per cache item, allow using multiple client instances per cache
 DECLARE_int32(fslib_s3client_max_instance_per_item);
+DECLARE_int32(fslib_s3client_nonread_max_retries);
+DECLARE_int32(fslib_s3client_nonread_retry_scale_factor);
+DECLARE_int32(fslib_s3client_connect_timeout_ms);
 // threadpool size for buffer prefetch task
 DECLARE_int32(fs_buffer_prefetch_threadpool_size);
 // switch to turn on/off buffer prefetch when read
@@ -112,6 +120,14 @@ absl::StatusOr<staros::starlet::ShardInfo> StarOSWorker::get_shard_info(ShardId 
         return absl::NotFoundError(fmt::format("failed to get shardinfo {}", id));
     }
     return it->second.shard_info;
+}
+
+absl::StatusOr<staros::starlet::ShardInfo> StarOSWorker::retrieve_shard_info(ShardId id) {
+    auto st = get_shard_info(id);
+    if (absl::IsNotFound(st.status())) {
+        return _fetch_shard_info_from_remote(id);
+    }
+    return st;
 }
 
 std::vector<staros::starlet::ShardInfo> StarOSWorker::shards() const {
@@ -183,8 +199,7 @@ absl::StatusOr<std::shared_ptr<fslib::FileSystem>> StarOSWorker::get_shard_files
     }
 }
 
-absl::StatusOr<std::shared_ptr<fslib::FileSystem>> StarOSWorker::build_filesystem_on_demand(ShardId id,
-                                                                                            const Configuration& conf) {
+absl::StatusOr<staros::starlet::ShardInfo> StarOSWorker::_fetch_shard_info_from_remote(ShardId id) {
     static const int64_t kGetShardInfoTimeout = 5 * 1000 * 1000; // 5s (heartbeat interval)
     static const int64_t kCheckInterval = 10 * 1000;             // 10ms
     Awaitility wait;
@@ -195,7 +210,12 @@ absl::StatusOr<std::shared_ptr<fslib::FileSystem>> StarOSWorker::build_filesyste
     }
 
     // get_shard_info call will probably trigger an add_shard() call to worker itself. Be sure there is no dead lock.
-    auto info_or = g_starlet->get_shard_info(id);
+    return g_starlet->get_shard_info(id);
+}
+
+absl::StatusOr<std::shared_ptr<fslib::FileSystem>> StarOSWorker::build_filesystem_on_demand(ShardId id,
+                                                                                            const Configuration& conf) {
+    auto info_or = _fetch_shard_info_from_remote(id);
     if (!info_or.ok()) {
         return info_or.status();
     }
@@ -248,85 +268,8 @@ absl::StatusOr<std::string> StarOSWorker::build_scheme_from_shard_info(const Sha
 }
 
 absl::StatusOr<fslib::Configuration> StarOSWorker::build_conf_from_shard_info(const ShardInfo& info) {
-    fslib::Configuration conf;
-
-    switch (info.path_info.fs_info().fs_type()) {
-    case staros::FileStoreType::S3: {
-        auto& s3_info = info.path_info.fs_info().s3_fs_info();
-        if (!info.path_info.full_path().empty()) {
-            conf[fslib::kSysRoot] = info.path_info.full_path();
-        }
-        if (!s3_info.bucket().empty()) {
-            conf[fslib::kS3Bucket] = s3_info.bucket();
-        }
-        if (!s3_info.region().empty()) {
-            conf[fslib::kS3Region] = s3_info.region();
-        }
-        if (!s3_info.endpoint().empty()) {
-            conf[fslib::kS3OverrideEndpoint] = s3_info.endpoint();
-        }
-        if (s3_info.has_credential()) {
-            auto& credential = s3_info.credential();
-            if (credential.has_default_credential()) {
-                conf[fslib::kS3CredentialType] = "default";
-            } else if (credential.has_simple_credential()) {
-                conf[fslib::kS3CredentialType] = "simple";
-                auto& simple_credential = credential.simple_credential();
-                conf[fslib::kS3CredentialSimpleAccessKeyId] = simple_credential.access_key();
-                conf[fslib::kS3CredentialSimpleAccessKeySecret] = simple_credential.access_key_secret();
-            } else if (credential.has_profile_credential()) {
-                conf[fslib::kS3CredentialType] = "instance_profile";
-            } else if (credential.has_assume_role_credential()) {
-                conf[fslib::kS3CredentialType] = "assume_role";
-                auto& role_credential = credential.assume_role_credential();
-                conf[fslib::kS3CredentialAssumeRoleArn] = role_credential.iam_role_arn();
-                conf[fslib::kS3CredentialAssumeRoleExternalId] = role_credential.external_id();
-            } else {
-                conf[fslib::kS3CredentialType] = "default";
-            }
-        }
-    } break;
-    case staros::FileStoreType::HDFS: {
-        conf[fslib::kSysRoot] = info.path_info.full_path();
-        break;
-    }
-    case staros::FileStoreType::AZBLOB: {
-        conf[fslib::kSysRoot] = info.path_info.full_path();
-        conf[fslib::kAzBlobEndpoint] = info.path_info.fs_info().azblob_fs_info().endpoint();
-        auto& credential = info.path_info.fs_info().azblob_fs_info().credential();
-        conf[fslib::kAzBlobSharedKey] = credential.shared_key();
-        conf[fslib::kAzBlobSASToken] = credential.sas_token();
-        conf[fslib::kAzBlobTenantId] = credential.tenant_id();
-        conf[fslib::kAzBlobClientId] = credential.client_id();
-        conf[fslib::kAzBlobClientSecret] = credential.client_secret();
-        conf[fslib::kAzBlobClientCertificatePath] = credential.client_certificate_path();
-        conf[fslib::kAzBlobAuthorityHost] = credential.authority_host();
-    } break;
-    default:
-        return absl::InvalidArgumentError("Unknown shard storage scheme!");
-    }
-
-    if (need_enable_cache(info)) {
-        auto& cache_info = info.cache_info;
-        const static std::string conf_prefix("cachefs.");
-
-        // rebuild configuration for cachefs
-        Configuration tmp;
-        tmp.swap(conf);
-        for (auto& iter : tmp) {
-            conf[conf_prefix + iter.first] = iter.second;
-        }
-        conf[fslib::kSysRoot] = "/";
-        // original fs sys.root as cachefs persistent uri
-        conf[fslib::kCacheFsPersistUri] = tmp[fslib::kSysRoot];
-        // use persistent uri as identifier to maximize sharing of cache data
-        conf[fslib::kCacheFsIdentifier] = tmp[fslib::kSysRoot];
-        conf[fslib::kCacheFsTtlSecs] = absl::StrFormat("%ld", cache_info.ttl_seconds());
-        if (cache_info.async_write_back()) {
-            conf[fslib::kCacheFsAsyncWriteBack] = "true";
-        }
-    }
-    return conf;
+    // use the remote fsroot as the default cache identifier
+    return info.fslib_conf_from_this(need_enable_cache(info), "");
 }
 
 absl::StatusOr<std::shared_ptr<StarOSWorker::FileSystem>> StarOSWorker::new_shared_filesystem(
@@ -392,6 +335,8 @@ Status to_status(const absl::Status& absl_status) {
         return Status::InvalidArgument(fmt::format("starlet err {}", absl_status.message()));
     case absl::StatusCode::kNotFound:
         return Status::NotFound(fmt::format("starlet err {}", absl_status.message()));
+    case absl::StatusCode::kResourceExhausted:
+        return Status::ResourceBusy(fmt::format("starlet err {}", absl_status.message()));
     default:
         return Status::InternalError(fmt::format("starlet err {}", absl_status.message()));
     }
@@ -404,23 +349,37 @@ void init_staros_worker() {
     // skip staros reinit aws sdk
     staros::starlet::fslib::skip_aws_init_api = true;
 
-    FLAGS_cachemgr_threadpool_size = config::starlet_cache_thread_num;
+    staros::starlet::common::GFlagsUtils::UpdateFlagValue("cachemgr_threadpool_size",
+                                                          std::to_string(config::starlet_cache_thread_num));
+    staros::starlet::common::GFlagsUtils::UpdateFlagValue("cachemgr_evict_low_water",
+                                                          std::to_string(config::starlet_cache_evict_low_water));
+    staros::starlet::common::GFlagsUtils::UpdateFlagValue("cachemgr_evict_high_water",
+                                                          std::to_string(config::starlet_cache_evict_high_water));
+    staros::starlet::common::GFlagsUtils::UpdateFlagValue("fs_stream_buffer_size_bytes",
+                                                          std::to_string(config::starlet_fs_stream_buffer_size_bytes));
+    staros::starlet::common::GFlagsUtils::UpdateFlagValue("fs_enable_buffer_prefetch",
+                                                          std::to_string(config::starlet_fs_read_prefetch_enable));
+    staros::starlet::common::GFlagsUtils::UpdateFlagValue(
+            "fs_buffer_prefetch_threadpool_size", std::to_string(config::starlet_fs_read_prefetch_threadpool_size));
+    staros::starlet::common::GFlagsUtils::UpdateFlagValue("cachemgr_evict_interval",
+                                                          std::to_string(config::starlet_cache_evict_interval));
+
     FLAGS_cachemgr_check_interval = config::starlet_cache_check_interval;
-    FLAGS_cachemgr_evict_interval = config::starlet_cache_evict_interval;
-    FLAGS_cachemgr_evict_low_water = config::starlet_cache_evict_low_water;
-    FLAGS_cachemgr_evict_high_water = config::starlet_cache_evict_high_water;
     FLAGS_cachemgr_dir_allocate_policy = config::starlet_cache_dir_allocate_policy;
-    FLAGS_fs_stream_buffer_size_bytes = config::starlet_fs_stream_buffer_size_bytes;
     FLAGS_fslib_s3_virtual_address_domainlist = config::starlet_s3_virtual_address_domainlist;
     // use the same configuration as the external query
     FLAGS_fslib_s3client_max_connections = config::object_storage_max_connection;
     FLAGS_fslib_s3client_max_items = config::starlet_s3_client_max_cache_capacity;
     FLAGS_fslib_s3client_max_instance_per_item = config::starlet_s3_client_num_instances_per_cache;
-    FLAGS_fs_enable_buffer_prefetch = config::starlet_fs_read_prefetch_enable;
-    FLAGS_fs_buffer_prefetch_threadpool_size = config::starlet_fs_read_prefetch_threadpool_size;
+    FLAGS_fslib_s3client_nonread_max_retries = config::starlet_fslib_s3client_nonread_max_retries;
+    FLAGS_fslib_s3client_nonread_retry_scale_factor = config::starlet_fslib_s3client_nonread_retry_scale_factor;
+    FLAGS_fslib_s3client_connect_timeout_ms = config::starlet_fslib_s3client_connect_timeout_ms;
+    fslib::FLAGS_delete_files_max_key_in_batch = config::starlet_delete_files_max_key_in_batch;
 
     fslib::FLAGS_use_star_cache = config::starlet_use_star_cache;
+    fslib::FLAGS_star_cache_async_init = config::starlet_star_cache_async_init;
     fslib::FLAGS_star_cache_mem_size_percent = config::starlet_star_cache_mem_size_percent;
+    fslib::FLAGS_star_cache_mem_size_bytes = config::starlet_star_cache_mem_size_bytes;
     fslib::FLAGS_star_cache_disk_size_percent = config::starlet_star_cache_disk_size_percent;
     fslib::FLAGS_star_cache_disk_size_bytes = config::starlet_star_cache_disk_size_bytes;
     fslib::FLAGS_star_cache_block_size_bytes = config::starlet_star_cache_block_size_bytes;
@@ -437,6 +396,27 @@ void shutdown_staros_worker() {
     g_starlet->stop();
     g_starlet.reset();
     g_worker = nullptr;
+
+    LOG(INFO) << "Executing starlet shutdown hooks ...";
+    staros::starlet::common::ShutdownHook::shutdown();
+}
+
+// must keep each config the same
+void update_staros_starcache() {
+    if (fslib::FLAGS_use_star_cache != config::starlet_use_star_cache) {
+        fslib::FLAGS_use_star_cache = config::starlet_use_star_cache;
+        (void)fslib::star_cache_init(fslib::FLAGS_use_star_cache);
+    }
+
+    if (fslib::FLAGS_star_cache_mem_size_percent != config::starlet_star_cache_mem_size_percent) {
+        fslib::FLAGS_star_cache_mem_size_percent = config::starlet_star_cache_mem_size_percent;
+        (void)fslib::star_cache_update_memory_quota_percent(fslib::FLAGS_star_cache_mem_size_percent);
+    }
+
+    if (fslib::FLAGS_star_cache_mem_size_bytes != config::starlet_star_cache_mem_size_bytes) {
+        fslib::FLAGS_star_cache_mem_size_bytes = config::starlet_star_cache_mem_size_bytes;
+        (void)fslib::star_cache_update_memory_quota_bytes(fslib::FLAGS_star_cache_mem_size_bytes);
+    }
 }
 
 } // namespace starrocks

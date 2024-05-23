@@ -25,6 +25,7 @@ import com.starrocks.catalog.AggregateType;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.ExpressionRangePartitionInfo;
 import com.starrocks.catalog.ExpressionRangePartitionInfoV2;
+import com.starrocks.catalog.FunctionSet;
 import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.catalog.PartitionType;
 import com.starrocks.catalog.RangePartitionInfo;
@@ -33,11 +34,14 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
 import com.starrocks.sql.analyzer.AnalyzerUtils;
 import com.starrocks.sql.analyzer.PartitionExprAnalyzer;
+import com.starrocks.sql.analyzer.PartitionFunctionChecker;
+import com.starrocks.sql.analyzer.SemanticException;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public class ExpressionPartitionDesc extends PartitionDesc {
 
@@ -46,6 +50,9 @@ public class ExpressionPartitionDesc extends PartitionDesc {
     private Type partitionType = null;
     // range partition desc == null means this must be materialized view
     private RangePartitionDesc rangePartitionDesc = null;
+
+    private static final List<String> AUTO_PARTITION_SUPPORT_FUNCTIONS =
+            Lists.newArrayList(FunctionSet.TIME_SLICE, FunctionSet.DATE_TRUNC);
 
     public ExpressionPartitionDesc(RangePartitionDesc rangePartitionDesc, Expr expr) {
         super(expr.getPos());
@@ -92,11 +99,16 @@ public class ExpressionPartitionDesc extends PartitionDesc {
         boolean hasExprAnalyze = false;
         SlotRef slotRef;
         if (rangePartitionDesc != null) {
-            rangePartitionDesc.analyze(columnDefs, otherProperties);
             // for automatic partition table
             if (rangePartitionDesc.isAutoPartitionTable) {
                 rangePartitionDesc.setAutoPartitionTable(true);
                 slotRef = AnalyzerUtils.getSlotRefFromFunctionCall(expr);
+                if (expr instanceof FunctionCallExpr) {
+                    FunctionCallExpr functionCallExpr = (FunctionCallExpr) expr;
+                    if (!AUTO_PARTITION_SUPPORT_FUNCTIONS.contains(functionCallExpr.getFnName().getFunction())) {
+                        throw new SemanticException("Only support date_trunc and time_slice as partition expression");
+                    }
+                }
             } else {
                 // for partition by range expr table
                 // The type of the partition field may be different from the type after the expression
@@ -105,10 +117,26 @@ public class ExpressionPartitionDesc extends PartitionDesc {
                     partitionType = ((CastExpr) expr).getTargetTypeDef().getType();
                 } else if (expr instanceof FunctionCallExpr) {
                     slotRef = AnalyzerUtils.getSlotRefFromFunctionCall(expr);
+
+                    Optional<ColumnDef> columnDef = columnDefs.stream()
+                            .filter(c -> c.getName().equals(slotRef.getColumnName())).findFirst();
+                    Preconditions.checkState(columnDef.isPresent());
+                    slotRef.setType(columnDef.get().getType());
+
+                    String functionName = ((FunctionCallExpr) expr).getFnName().getFunction().toLowerCase();
+                    if (functionName.equals(FunctionSet.STR2DATE)) {
+                        partitionType = Type.DATE;
+                        if (!PartitionFunctionChecker.checkStr2date(expr)) {
+                            throw new SemanticException("partition function check fail, only supports the result " +
+                                    "of the function str2date(VARCHAR str, VARCHAR format) as a strict DATE type");
+                        }
+                    }
                 } else {
                     throw new AnalysisException("Unsupported expr:" + expr.toSql());
                 }
             }
+            rangePartitionDesc.partitionType = partitionType;
+            rangePartitionDesc.analyze(columnDefs, otherProperties);
         } else {
             // for materialized view
             slotRef = AnalyzerUtils.getSlotRefFromFunctionCall(expr);
@@ -118,6 +146,7 @@ public class ExpressionPartitionDesc extends PartitionDesc {
             if (columnDef.getName().equalsIgnoreCase(slotRef.getColumnName())) {
                 slotRef.setType(columnDef.getType());
                 PartitionExprAnalyzer.analyzePartitionExpr(expr, slotRef);
+                partitionType = expr.getType();
                 hasExprAnalyze = true;
             }
         }
@@ -147,7 +176,7 @@ public class ExpressionPartitionDesc extends PartitionDesc {
         }
         for (Column column : partitionColumns) {
             try {
-                RangePartitionInfo.checkRangeColumnType(column);
+                RangePartitionInfo.checkExpressionRangeColumnType(column, expr);
             } catch (AnalysisException e) {
                 throw new DdlException(e.getMessage());
             }

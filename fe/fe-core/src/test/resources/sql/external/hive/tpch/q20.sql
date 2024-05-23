@@ -1,41 +1,3 @@
-[sql]
-select
-    s_name,
-    s_address
-from
-    supplier,
-    nation
-where
-        s_suppkey in (
-        select
-            ps_suppkey
-        from
-            partsupp
-        where
-                ps_partkey in (
-                select
-                    p_partkey
-                from
-                    part
-                where
-                        p_name like 'sienna%'
-            )
-          and ps_availqty > (
-            select
-                    0.5 * sum(l_quantity)
-            from
-                lineitem
-            where
-                    l_partkey = ps_partkey
-              and l_suppkey = ps_suppkey
-              and l_shipdate >= date '1993-01-01'
-              and l_shipdate < date '1994-01-01'
-        )
-    )
-  and s_nationkey = n_nationkey
-  and n_name = 'ARGENTINA'
-order by
-    s_name ;
 [fragment statistics]
 PLAN FRAGMENT 0(F14)
 Output Exprs:2: s_name | 3: s_address
@@ -48,8 +10,6 @@ cardinality: 40000
 column statistics:
 * s_name-->[-Infinity, Infinity, 0.0, 25.0, 40000.0] ESTIMATE
 * s_address-->[-Infinity, Infinity, 0.0, 40.0, 40000.0] ESTIMATE
-* s_nationkey-->[0.0, 24.0, 0.0, 4.0, 1.0] ESTIMATE
-* n_nationkey-->[0.0, 24.0, 0.0, 4.0, 1.0] ESTIMATE
 
 PLAN FRAGMENT 1(F13)
 
@@ -164,7 +124,7 @@ OutPut Exchange Id: 19
 17:HdfsScanNode
 TABLE: nation
 NON-PARTITION PREDICATES: 9: n_name = 'ARGENTINA'
-MIN/MAX PREDICATES: 49: n_name <= 'ARGENTINA', 50: n_name >= 'ARGENTINA'
+MIN/MAX PREDICATES: 9: n_name <= 'ARGENTINA', 9: n_name >= 'ARGENTINA'
 partitions=1/1
 avgRowSize=29.0
 cardinality: 1
@@ -193,7 +153,7 @@ OutPut Exchange Id: 15
 |  build runtime filters:
 |  - filter_id = 1, build_expr = (12: ps_partkey), remote = true
 |  - filter_id = 2, build_expr = (13: ps_suppkey), remote = false
-|  output columns: 13, 14, 43
+|  output columns: 13
 |  cardinality: 39032168
 |  column statistics:
 |  * ps_partkey-->[1.0, 2.0E7, 0.0, 8.0, 5000000.0] ESTIMATE
@@ -338,7 +298,7 @@ OutPut Exchange Id: 03
 0:HdfsScanNode
 TABLE: lineitem
 NON-PARTITION PREDICATES: 29: l_suppkey IS NOT NULL, 37: l_shipdate >= '1993-01-01', 37: l_shipdate < '1994-01-01'
-MIN/MAX PREDICATES: 47: l_shipdate >= '1993-01-01', 48: l_shipdate < '1994-01-01'
+MIN/MAX PREDICATES: 37: l_shipdate >= '1993-01-01', 37: l_shipdate < '1994-01-01'
 partitions=1/1
 avgRowSize=24.0
 cardinality: 86738152

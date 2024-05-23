@@ -20,7 +20,6 @@ import com.starrocks.common.util.ConsistentHashRing;
 import com.starrocks.common.util.HashRing;
 import com.starrocks.planner.HdfsScanNode;
 import com.starrocks.qe.scheduler.DefaultWorkerProvider;
-import com.starrocks.sql.PlannerProfile;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.THdfsScanRange;
 import com.starrocks.thrift.TNetworkAddress;
@@ -29,8 +28,6 @@ import com.starrocks.thrift.TScanRangeLocation;
 import com.starrocks.thrift.TScanRangeLocations;
 import com.starrocks.thrift.TScanRangeParams;
 import mockit.Expectations;
-import mockit.Mock;
-import mockit.MockUp;
 import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Test;
@@ -49,7 +46,7 @@ public class HDFSBackendSelectorTest {
     private ConnectContext context;
     final int scanNodeId = 0;
     final int computeNodePort = 9030;
-    final String hostFormat = "Host%02d";
+    final String hostFormat = "192.168.1.%02d";
 
     private List<TScanRangeLocations> createScanRanges(long number, long size) {
         List<TScanRangeLocations> ans = new ArrayList<>();
@@ -100,11 +97,6 @@ public class HDFSBackendSelectorTest {
 
     @Test
     public void testHdfsScanNodeHashRing() throws Exception {
-        new MockUp<PlannerProfile>() {
-            @Mock
-            public void addCustomProperties(String name, String value) {
-            }
-        };
         SessionVariable sessionVariable = new SessionVariable();
         new Expectations() {
             {
@@ -125,7 +117,7 @@ public class HDFSBackendSelectorTest {
             }
         };
 
-        int scanRangeNumber = 100;
+        int scanRangeNumber = 10000;
         int scanRangeSize = 10000;
         int hostNumber = 3;
         List<TScanRangeLocations> locations = createScanRanges(scanRangeNumber, scanRangeSize);
@@ -144,11 +136,11 @@ public class HDFSBackendSelectorTest {
         selector.computeScanRangeAssignment();
 
         int avg = (scanRangeNumber * scanRangeSize) / hostNumber;
-        int variance = 5 * scanRangeSize;
+        double variance = 0.2 * avg;
         Map<Long, Long> stats = computeWorkerIdToReadBytes(assignment, scanNodeId);
         for (Map.Entry<Long, Long> entry : stats.entrySet()) {
             System.out.printf("%s -> %d bytes\n", entry.getKey(), entry.getValue());
-            Assert.assertTrue(Math.abs(entry.getValue() - avg) < variance);
+            Assert.assertTrue(entry.getValue() - avg < variance);
         }
 
         // test empty compute nodes
@@ -171,11 +163,6 @@ public class HDFSBackendSelectorTest {
 
     @Test
     public void testHdfsScanNodeScanRangeReBalance() throws Exception {
-        new MockUp<PlannerProfile>() {
-            @Mock
-            public void addCustomProperties(String name, String value) {
-            }
-        };
         SessionVariable sessionVariable = new SessionVariable();
         new Expectations() {
             {
@@ -196,7 +183,7 @@ public class HDFSBackendSelectorTest {
             }
         };
 
-        long scanRangeNumber = 100;
+        long scanRangeNumber = 10000;
         long scanRangeSize = 10000;
         int hostNumber = 3;
         List<TScanRangeLocations> locations = createScanRanges(scanRangeNumber, scanRangeSize);
@@ -219,14 +206,16 @@ public class HDFSBackendSelectorTest {
         Map<Long, Long> stats = computeWorkerIdToReadBytes(assignment, scanNodeId);
         for (Map.Entry<Long, Long> entry : stats.entrySet()) {
             System.out.printf("%s -> %d bytes\n", entry.getKey(), entry.getValue());
-            Assert.assertTrue(Math.abs(entry.getValue() - avg) < variance);
+            Assert.assertTrue((entry.getValue() - avg) < variance);
         }
 
-        variance = 2 * scanRangeSize;
+        variance = 0.4 / 100 * scanRangeNumber * scanRangeSize;
+        double actual = 0;
         for (Map.Entry<ComputeNode, Long> entry : selector.reBalanceBytesPerComputeNode.entrySet()) {
             System.out.printf("%s -> %d bytes re-balance\n", entry.getKey(), entry.getValue());
-            Assert.assertTrue(entry.getValue() <= variance);
+            actual = actual + entry.getValue();
         }
+        Assert.assertTrue(actual < variance);
     }
 
     @Test

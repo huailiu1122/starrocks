@@ -41,10 +41,13 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Table.TableType;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.util.concurrent.lock.LockType;
+import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
+import com.starrocks.privilege.AccessDeniedException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.thrift.TStorageType;
@@ -65,7 +68,7 @@ public class StorageTypeCheckAction extends RestBaseAction {
     }
 
     @Override
-    protected void executeWithoutPassword(BaseRequest request, BaseResponse response) throws DdlException {
+    protected void executeWithoutPassword(BaseRequest request, BaseResponse response) throws DdlException, AccessDeniedException {
         UserIdentity currentUser = ConnectContext.get().getCurrentUserIdentity();
         checkUserOwnsAdminRole(currentUser);
 
@@ -80,7 +83,8 @@ public class StorageTypeCheckAction extends RestBaseAction {
         }
 
         JSONObject root = new JSONObject();
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             List<Table> tbls = db.getTables();
             for (Table tbl : tbls) {
@@ -99,7 +103,7 @@ public class StorageTypeCheckAction extends RestBaseAction {
                 root.put(tbl.getName(), indexObj);
             }
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
 
         // to json response

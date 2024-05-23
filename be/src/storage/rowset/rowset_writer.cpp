@@ -52,10 +52,13 @@
 #include "serde/column_array_serde.h"
 #include "storage/aggregate_iterator.h"
 #include "storage/chunk_helper.h"
+#include "storage/empty_iterator.h"
+#include "storage/inverted/index_descriptor.hpp"
 #include "storage/merge_iterator.h"
 #include "storage/metadata_util.h"
 #include "storage/olap_define.h"
 #include "storage/row_source_mask.h"
+#include "storage/rows_mapper.h"
 #include "storage/rowset/rowset.h"
 #include "storage/rowset/rowset_factory.h"
 #include "storage/storage_engine.h"
@@ -114,16 +117,26 @@ Status RowsetWriter::init() {
     }
     *(_rowset_meta_pb->mutable_tablet_uid()) = _context.tablet_uid.to_proto();
 
+    _writer_options.segment_file_mark.rowset_path_prefix = _context.rowset_path_prefix;
+    _writer_options.segment_file_mark.rowset_id = _context.rowset_id.to_string();
+
     _writer_options.global_dicts = _context.global_dicts != nullptr ? _context.global_dicts : nullptr;
     _writer_options.referenced_column_ids = _context.referenced_column_ids;
 
     if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS &&
-        (_context.partial_update_tablet_schema || !_context.merge_condition.empty() ||
-         _context.miss_auto_increment_column)) {
+        (_context.is_partial_update || !_context.merge_condition.empty() || _context.miss_auto_increment_column)) {
         _rowset_txn_meta_pb = std::make_unique<RowsetTxnMetaPB>();
     }
 
     ASSIGN_OR_RETURN(_fs, FileSystem::CreateSharedFromString(_context.rowset_path_prefix));
+
+    if (_context.is_pk_compaction) {
+        TabletSharedPtr tablet = StorageEngine::instance()->tablet_manager()->get_tablet(_context.tablet_id);
+        if (tablet != nullptr) {
+            _rows_mapper_builder = std::make_unique<RowsMapperBuilder>(
+                    local_rows_mapper_filename(tablet.get(), _context.rowset_id.to_string()));
+        }
+    }
     return Status::OK();
 }
 
@@ -142,6 +155,7 @@ StatusOr<RowsetSharedPtr> RowsetWriter::build() {
     _rowset_meta_pb->set_num_segments(_num_segment);
     // newly created rowset do not have rowset_id yet, use 0 instead
     _rowset_meta_pb->set_rowset_seg_id(0);
+    _rowset_meta_pb->set_gtid(_context.gtid);
     // updatable tablet require extra processing
     if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS) {
         DCHECK(_delfile_idxes.size() == _num_delfile);
@@ -155,14 +169,14 @@ StatusOr<RowsetSharedPtr> RowsetWriter::build() {
             _rowset_meta_pb->set_segments_overlap_pb(NONOVERLAPPING);
         }
         // if load only has delete, we can skip the partial update logic
-        if (_context.partial_update_tablet_schema && _flush_chunk_state != FlushChunkState::DELETE) {
-            DCHECK(_context.referenced_column_ids.size() == _context.partial_update_tablet_schema->columns().size());
+        if (_context.is_partial_update && _flush_chunk_state != FlushChunkState::DELETE) {
+            DCHECK(_context.referenced_column_ids.size() == _context.tablet_schema->columns().size());
             RETURN_IF(_num_segment != _rowset_txn_meta_pb->partial_rowset_footers().size(),
                       Status::InternalError(fmt::format("segment number {} not equal to partial_rowset_footers size {}",
                                                         _num_segment,
                                                         _rowset_txn_meta_pb->partial_rowset_footers().size())));
-            for (auto i = 0; i < _context.partial_update_tablet_schema->columns().size(); ++i) {
-                const auto& tablet_column = _context.partial_update_tablet_schema->column(i);
+            for (auto i = 0; i < _context.tablet_schema->columns().size(); ++i) {
+                const auto& tablet_column = _context.tablet_schema->column(i);
                 _rowset_txn_meta_pb->add_partial_update_column_ids(_context.referenced_column_ids[i]);
                 _rowset_txn_meta_pb->add_partial_update_column_unique_ids(tablet_column.unique_id());
             }
@@ -210,10 +224,20 @@ StatusOr<RowsetSharedPtr> RowsetWriter::build() {
     } else {
         _rowset_meta_pb->set_rowset_state(VISIBLE);
     }
+    TabletSchemaPB* ts_pb = _rowset_meta_pb->mutable_tablet_schema();
+    if (_context.full_tablet_schema != nullptr) {
+        _context.full_tablet_schema->to_schema_pb(ts_pb);
+    } else {
+        _context.tablet_schema->to_schema_pb(ts_pb);
+    }
+
     auto rowset_meta = std::make_shared<RowsetMeta>(_rowset_meta_pb);
     RowsetSharedPtr rowset;
     RETURN_IF_ERROR(
             RowsetFactory::create_rowset(_context.tablet_schema, _context.rowset_path_prefix, rowset_meta, &rowset));
+    if (_rows_mapper_builder != nullptr) {
+        RETURN_IF_ERROR(_rows_mapper_builder->finalize());
+    }
     _already_built = true;
     return rowset;
 }
@@ -250,7 +274,7 @@ Status RowsetWriter::_flush_segment(const SegmentPB& segment_pb, butil::IOBuf& d
     }
     RETURN_IF_ERROR(wfile->close());
 
-    if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS && _context.partial_update_tablet_schema) {
+    if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS && _context.is_partial_update) {
         auto* partial_rowset_footer = _rowset_txn_meta_pb->add_partial_rowset_footers();
         partial_rowset_footer->set_position(segment_pb.partial_footer_position());
         partial_rowset_footer->set_size(segment_pb.partial_footer_size());
@@ -420,6 +444,23 @@ HorizontalRowsetWriter::~HorizontalRowsetWriter() {
                         << "Fail to delete file=" << path << ", " << st.to_string();
             }
         }
+
+        if (_context.tablet_schema != nullptr) {
+            const auto& indexes = *_context.tablet_schema->indexes();
+            if (!indexes.empty()) {
+                for (int i = 0; i < _num_segment; i++) {
+                    for (const auto& index : indexes) {
+                        if (index.index_type() == GIN) {
+                            std::string index_path = IndexDescriptor::inverted_index_file_path(
+                                    _context.rowset_path_prefix, _context.rowset_id.to_string(), i, index.index_id());
+                            auto index_st = _fs->delete_dir_recursive(index_path);
+                            LOG_IF(WARNING, !(index_st.ok() || index_st.is_not_found()))
+                                    << "Fail to delete file=" << index_path << ", " << index_st.to_string();
+                        }
+                    }
+                }
+            }
+        }
         // if _already_built is false, we need to release rowset_id to avoid rowset_id leak
         StorageEngine::instance()->release_rowset_id(_context.rowset_id);
     }
@@ -446,6 +487,11 @@ StatusOr<std::unique_ptr<SegmentWriter>> HorizontalRowsetWriter::_create_segment
 }
 
 Status HorizontalRowsetWriter::add_chunk(const Chunk& chunk) {
+    std::vector<uint64_t> empty_rssid_rowids;
+    return add_chunk(chunk, empty_rssid_rowids);
+}
+
+Status HorizontalRowsetWriter::add_chunk(const Chunk& chunk, const std::vector<uint64_t>& rssid_rowids) {
     if (_segment_writer == nullptr) {
         ASSIGN_OR_RETURN(_segment_writer, _create_segment_writer());
     } else if (_segment_writer->estimate_segment_size() >= config::max_segment_file_size ||
@@ -455,6 +501,9 @@ Status HorizontalRowsetWriter::add_chunk(const Chunk& chunk) {
     }
 
     RETURN_IF_ERROR(_segment_writer->append_chunk(chunk));
+    if (_rows_mapper_builder != nullptr) {
+        RETURN_IF_ERROR(_rows_mapper_builder->append(rssid_rowids));
+    }
     _num_rows_written += static_cast<int64_t>(chunk.num_rows());
     _total_row_size += static_cast<int64_t>(chunk.bytes_usage());
     return Status::OK();
@@ -657,7 +706,8 @@ Status HorizontalRowsetWriter::_final_merge() {
         }
         std::string tmp_segment_file =
                 Rowset::segment_temp_file_path(_context.rowset_path_prefix, _context.rowset_id, seg_id);
-        auto segment_ptr = Segment::open(_fs, tmp_segment_file, seg_id, _context.tablet_schema);
+        FileInfo tmp_segment_info{.path = tmp_segment_file};
+        auto segment_ptr = Segment::open(_fs, tmp_segment_info, seg_id, _context.tablet_schema);
         if (!segment_ptr.ok()) {
             LOG(WARNING) << "Fail to open " << tmp_segment_file << ": " << segment_ptr.status();
             return segment_ptr.status();
@@ -723,7 +773,7 @@ Status HorizontalRowsetWriter::_final_merge() {
         } else {
             itr = new_aggregate_iterator(new_heap_merge_iterator(seg_iterators, _context.merge_condition), true);
         }
-        itr->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS);
+        RETURN_IF_ERROR(itr->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS));
 
         _context.max_rows_per_segment = CompactionUtils::get_segment_max_rows(config::max_segment_file_size,
                                                                               _num_rows_written, _total_data_size);
@@ -790,7 +840,7 @@ Status HorizontalRowsetWriter::_final_merge() {
         RETURN_IF_ERROR(mask_buffer->flush());
 
         for (size_t i = 1; i < column_groups.size(); ++i) {
-            mask_buffer->flip_to_read();
+            RETURN_IF_ERROR(mask_buffer->flip_to_read());
 
             seg_iterators.clear();
 
@@ -821,7 +871,7 @@ Status HorizontalRowsetWriter::_final_merge() {
             } else {
                 itr = new_aggregate_iterator(new_mask_merge_iterator(seg_iterators, mask_buffer.get()), false);
             }
-            itr->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS);
+            RETURN_IF_ERROR(itr->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS));
 
             auto chunk_shared_ptr = ChunkHelper::new_chunk(schema, config::vector_chunk_size);
             auto chunk = chunk_shared_ptr.get();
@@ -877,7 +927,9 @@ Status HorizontalRowsetWriter::_final_merge() {
 
         ChunkIteratorPtr itr;
         // create temporary segment files at first, then merge them and create final segment files if schema change with sorting
-        if (_context.schema_change_sorting) {
+        if (seg_iterators.empty()) {
+            itr = new_empty_iterator(schema, config::vector_chunk_size);
+        } else if (_context.schema_change_sorting) {
             if (_context.tablet_schema->keys_type() == KeysType::DUP_KEYS ||
                 _context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS) {
                 itr = new_heap_merge_iterator(seg_iterators);
@@ -893,7 +945,7 @@ Status HorizontalRowsetWriter::_final_merge() {
         } else {
             itr = new_aggregate_iterator(new_heap_merge_iterator(seg_iterators, _context.merge_condition), 0);
         }
-        itr->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS);
+        RETURN_IF_ERROR(itr->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS));
 
         auto chunk_shared_ptr = ChunkHelper::new_chunk(schema, config::vector_chunk_size);
         auto chunk = chunk_shared_ptr.get();
@@ -972,7 +1024,7 @@ Status HorizontalRowsetWriter::_flush_segment_writer(std::unique_ptr<SegmentWrit
     RETURN_IF_ERROR((*segment_writer)->finalize(&segment_size, &index_size, &footer_position));
     _num_rows_of_tmp_segment_files.push_back(_num_rows_written - _num_rows_flushed);
     _num_rows_flushed = _num_rows_written;
-    if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS && _context.partial_update_tablet_schema) {
+    if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS && _context.is_partial_update) {
         uint64_t footer_size = segment_size - footer_position;
         auto* partial_rowset_footer = _rowset_txn_meta_pb->add_partial_rowset_footers();
         partial_rowset_footer->set_position(footer_position);
@@ -1025,6 +1077,20 @@ VerticalRowsetWriter::~VerticalRowsetWriter() {
             auto st = _fs->delete_file(path);
             LOG_IF(WARNING, !(st.ok() || st.is_not_found()))
                     << "Fail to delete file=" << path << ", " << st.to_string();
+            if (_context.tablet_schema != nullptr) {
+                const auto* indexes = _context.tablet_schema->indexes();
+                if (!indexes->empty()) {
+                    for (const auto& index : *indexes) {
+                        if (index.index_type() == GIN) {
+                            std::string index_path = IndexDescriptor::inverted_index_file_path(
+                                    _context.rowset_path_prefix, _context.rowset_id.to_string(), i, index.index_id());
+                            auto index_st = _fs->delete_file(index_path);
+                            LOG_IF(WARNING, !(index_st.ok() || index_st.is_not_found()))
+                                    << "Fail to delete file=" << index_path << ", " << index_st.to_string();
+                        }
+                    }
+                }
+            }
         }
         // if _already_built is false, we need to release rowset_id to avoid rowset_id leak
         StorageEngine::instance()->release_rowset_id(_context.rowset_id);
@@ -1032,6 +1098,12 @@ VerticalRowsetWriter::~VerticalRowsetWriter() {
 }
 
 Status VerticalRowsetWriter::add_columns(const Chunk& chunk, const std::vector<uint32_t>& column_indexes, bool is_key) {
+    std::vector<uint64_t> empty_rssid_rowids;
+    return add_columns(chunk, column_indexes, is_key, empty_rssid_rowids);
+}
+
+Status VerticalRowsetWriter::add_columns(const Chunk& chunk, const std::vector<uint32_t>& column_indexes, bool is_key,
+                                         const std::vector<uint64_t>& rssid_rowids) {
     const size_t chunk_num_rows = chunk.num_rows();
     if (_segment_writers.empty()) {
         DCHECK(is_key);
@@ -1040,6 +1112,9 @@ Status VerticalRowsetWriter::add_columns(const Chunk& chunk, const std::vector<u
         _segment_writers.emplace_back(std::move(segment_writer).value());
         _current_writer_index = 0;
         RETURN_IF_ERROR(_segment_writers[_current_writer_index]->append_chunk(chunk));
+        if (_rows_mapper_builder != nullptr) {
+            RETURN_IF_ERROR(_rows_mapper_builder->append(rssid_rowids));
+        }
     } else if (is_key) {
         // key columns
         if (_segment_writers[_current_writer_index]->num_rows_written() + chunk_num_rows >=
@@ -1051,6 +1126,9 @@ Status VerticalRowsetWriter::add_columns(const Chunk& chunk, const std::vector<u
             ++_current_writer_index;
         }
         RETURN_IF_ERROR(_segment_writers[_current_writer_index]->append_chunk(chunk));
+        if (_rows_mapper_builder != nullptr) {
+            RETURN_IF_ERROR(_rows_mapper_builder->append(rssid_rowids));
+        }
     } else {
         // non key columns
         uint32_t num_rows_written = _segment_writers[_current_writer_index]->num_rows_written();
@@ -1119,7 +1197,7 @@ Status VerticalRowsetWriter::final_flush() {
             LOG(WARNING) << "Fail to finalize segment footer, " << st;
             return st;
         }
-        if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS && _context.partial_update_tablet_schema) {
+        if (_context.tablet_schema->keys_type() == KeysType::PRIMARY_KEYS && _context.is_partial_update) {
             auto* partial_rowset_footer = _rowset_txn_meta_pb->add_partial_rowset_footers();
             partial_rowset_footer->set_position(footer_position);
             partial_rowset_footer->set_size(segment_size - footer_position);

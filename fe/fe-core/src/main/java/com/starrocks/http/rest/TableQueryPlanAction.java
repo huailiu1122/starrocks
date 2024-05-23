@@ -36,21 +36,28 @@ package com.starrocks.http.rest;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Strings;
+import com.google.common.collect.Maps;
 import com.starrocks.analysis.TableName;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.FeConstants;
 import com.starrocks.common.StarRocksHttpException;
+import com.starrocks.common.util.NetUtils;
+import com.starrocks.common.util.concurrent.lock.LockType;
+import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
 import com.starrocks.planner.PlanFragment;
+import com.starrocks.privilege.AccessDeniedException;
 import com.starrocks.privilege.PrivilegeType;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.StatementPlanner;
 import com.starrocks.sql.analyzer.AnalyzerUtils;
+import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.SelectRelation;
 import com.starrocks.sql.ast.StatementBase;
@@ -106,7 +113,7 @@ public class TableQueryPlanAction extends RestBaseAction {
 
     @Override
     protected void executeWithoutPassword(BaseRequest request, BaseResponse response)
-            throws DdlException {
+            throws DdlException, AccessDeniedException {
         // just allocate 2 slot for top holder map
         Map<String, Object> resultMap = new HashMap<>(4);
         String dbName = request.getSingleParameter(DB_KEY);
@@ -139,14 +146,16 @@ public class TableQueryPlanAction extends RestBaseAction {
                     sql, ConnectContext.get().getCurrentUserIdentity(), dbName, tableName);
 
             // check privilege for select, otherwise return HTTP 401
-            checkTableAction(ConnectContext.get(), dbName, tableName, PrivilegeType.SELECT);
+            Authorizer.checkTableAction(ConnectContext.get().getCurrentUserIdentity(), ConnectContext.get().getCurrentRoleIds(),
+                    dbName, tableName, PrivilegeType.SELECT);
             Database db = GlobalStateMgr.getCurrentState().getDb(dbName);
             if (db == null) {
                 throw new StarRocksHttpException(HttpResponseStatus.NOT_FOUND,
                         "Database [" + dbName + "] " + "does not exists");
             }
             // may be should acquire writeLock
-            db.readLock();
+            Locker locker = new Locker();
+            locker.lockDatabase(db, LockType.READ);
             try {
                 Table table = db.getTable(tableName);
                 if (table == null) {
@@ -162,7 +171,7 @@ public class TableQueryPlanAction extends RestBaseAction {
                 // parse/analysis/plan the sql and acquire tablet distributions
                 handleQuery(ConnectContext.get(), db.getFullName(), tableName, sql, resultMap);
             } finally {
-                db.readUnlock();
+                locker.unLockDatabase(db, LockType.READ);
             }
         } catch (StarRocksHttpException e) {
             // status code  should conforms to HTTP semantic
@@ -255,6 +264,13 @@ public class TableQueryPlanAction extends RestBaseAction {
                     "The Sql is invalid");
         }
 
+        if (execPlan.getScanNodes().isEmpty() && FeConstants.enablePruneEmptyOutputScan) {
+            result.put("partitions", Maps.newHashMap());
+            result.put("opaqued_query_plan", "");
+            result.put("status", 200);
+            return;
+        }
+
         // acquire ScanNode to obtain pruned tablet
         // in this way, just retrieve only one scannode
         if (execPlan.getScanNodes().size() != 1) {
@@ -271,6 +287,7 @@ public class TableQueryPlanAction extends RestBaseAction {
         }
 
         TQueryPlanInfo tQueryPlanInfo = new TQueryPlanInfo();
+        tQueryPlanInfo.output_names = execPlan.getColNames();
 
         // acquire TPlanFragment
         TPlanFragment tPlanFragment = fragments.get(0).toThrift();
@@ -323,7 +340,7 @@ public class TableQueryPlanAction extends RestBaseAction {
             TInternalScanRange scanRange = scanRangeLocations.scan_range.internal_scan_range;
             Node tabletRouting = new Node(Long.parseLong(scanRange.version), Integer.parseInt(scanRange.schema_hash));
             for (TNetworkAddress address : scanRange.hosts) {
-                tabletRouting.addRouting(address.hostname + ":" + address.port);
+                tabletRouting.addRouting(NetUtils.getHostPortInAccessibleFormat(address.hostname, address.port));
             }
             result.put(String.valueOf(scanRange.tablet_id), tabletRouting);
         }

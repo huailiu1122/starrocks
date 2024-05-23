@@ -77,7 +77,6 @@ protected:
     OlapReaderStatistics _stats;
 
     void SetUp() override {
-        _page_cache_mem_tracker = std::make_unique<MemTracker>();
         config::tablet_map_shard_size = 1;
         config::txn_map_shard_size = 1;
         config::txn_shard_size = 1;
@@ -101,7 +100,6 @@ protected:
         ASSERT_TRUE(fs::create_directories(rowset_dir).ok());
         ASSERT_TRUE(fs::create_directories(config::storage_root_path + "/data/rowset_test_seg").ok());
         ASSERT_TRUE(fs::create_directories(config::storage_root_path + "/data/rowset_test_delete").ok());
-        StoragePageCache::create_global_cache(_page_cache_mem_tracker.get(), 1000000000);
         i++;
     }
 
@@ -112,7 +110,7 @@ protected:
         if (fs::path_exist(config::storage_root_path)) {
             ASSERT_TRUE(fs::remove_all(config::storage_root_path).ok());
         }
-        StoragePageCache::release_global_cache();
+        StoragePageCache::instance()->prune();
         config::storage_root_path = _default_storage_root_path;
     }
 
@@ -221,6 +219,7 @@ protected:
 
     void create_partial_rowset_writer_context(int64_t tablet_id, const std::vector<int32_t>& column_indexes,
                                               const std::shared_ptr<TabletSchema>& partial_schema,
+                                              const TabletSchemaCSPtr& full_schema,
                                               RowsetWriterContext* rowset_writer_context) {
         RowsetId rowset_id;
         rowset_id.init(10000);
@@ -230,8 +229,9 @@ protected:
         rowset_writer_context->partition_id = 10;
         rowset_writer_context->rowset_path_prefix = config::storage_root_path + "/data/rowset_test";
         rowset_writer_context->rowset_state = VISIBLE;
-        rowset_writer_context->partial_update_tablet_schema = partial_schema;
         rowset_writer_context->tablet_schema = partial_schema;
+        rowset_writer_context->full_tablet_schema = full_schema;
+        rowset_writer_context->is_partial_update = true;
         rowset_writer_context->referenced_column_ids = column_indexes;
         rowset_writer_context->version.first = 0;
         rowset_writer_context->version.second = 0;
@@ -240,7 +240,6 @@ protected:
     void test_final_merge(bool has_merge_condition);
 
 private:
-    std::unique_ptr<MemTracker> _page_cache_mem_tracker = nullptr;
     std::string _default_storage_root_path;
 };
 
@@ -334,13 +333,13 @@ void RowsetTest::test_final_merge(bool has_merge_condition = false) {
             seg_options.stats = &_stats;
             std::string segment_file =
                     Rowset::segment_file_path(writer_context.rowset_path_prefix, writer_context.rowset_id, seg_id);
-            auto segment = *Segment::open(seg_options.fs, segment_file, 0, tablet->tablet_schema());
+            auto segment = *Segment::open(seg_options.fs, FileInfo{segment_file}, 0, tablet->tablet_schema());
             ASSERT_NE(segment->num_rows(), 0);
             auto res = segment->new_iterator(schema, seg_options);
             ASSERT_FALSE(res.status().is_end_of_file() || !res.ok() || res.value() == nullptr);
             auto seg_iterator = res.value();
 
-            seg_iterator->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS);
+            ASSERT_TRUE(seg_iterator->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS).ok());
 
             auto chunk = ChunkHelper::new_chunk(schema, 100);
             while (true) {
@@ -423,6 +422,15 @@ TEST_F(RowsetTest, ConditionUpdateWithMultipleSegmentsTest) {
     test_final_merge(true);
 }
 
+TEST_F(RowsetTest, UnSupportFuncTest) {
+    Chunk chunk;
+    std::vector<uint64_t> rssid_rowids;
+    std::vector<uint32_t> column_indexes;
+    RowsetWriter writer;
+    ASSERT_TRUE(writer.add_chunk(chunk, rssid_rowids).is_not_supported());
+    ASSERT_TRUE(writer.add_columns(chunk, column_indexes, true, rssid_rowids).is_not_supported());
+}
+
 TEST_F(RowsetTest, FinalMergeVerticalTest) {
     auto tablet = create_tablet(12345, 1111);
     RowsetSharedPtr rowset;
@@ -494,14 +502,14 @@ TEST_F(RowsetTest, FinalMergeVerticalTest) {
 
             std::string segment_file =
                     Rowset::segment_file_path(writer_context.rowset_path_prefix, writer_context.rowset_id, seg_id);
-            auto segment = *Segment::open(seg_options.fs, segment_file, 0, tablet->tablet_schema());
+            auto segment = *Segment::open(seg_options.fs, FileInfo{segment_file}, 0, tablet->tablet_schema());
 
             ASSERT_NE(segment->num_rows(), 0);
             auto res = segment->new_iterator(schema, seg_options);
             ASSERT_FALSE(res.status().is_end_of_file() || !res.ok() || res.value() == nullptr);
 
             auto seg_iterator = res.value();
-            seg_iterator->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS);
+            ASSERT_TRUE(seg_iterator->init_encoded_schema(EMPTY_GLOBAL_DICTMAPS).ok());
             auto chunk = ChunkHelper::new_chunk(seg_iterator->schema(), 100);
             while (true) {
                 auto st = seg_iterator->get_next(chunk.get());
@@ -634,7 +642,8 @@ TEST_F(RowsetTest, FinalMergeVerticalPartialTest) {
     RowsetWriterContext writer_context;
     std::vector<int32_t> column_indexes = {0, 1, 2, 3};
     std::shared_ptr<TabletSchema> partial_schema = TabletSchema::create(tablet->tablet_schema(), column_indexes);
-    create_partial_rowset_writer_context(12345, column_indexes, partial_schema, &writer_context);
+    create_partial_rowset_writer_context(12345, column_indexes, partial_schema, tablet->tablet_schema(),
+                                         &writer_context);
     writer_context.segments_overlap = OVERLAP_UNKNOWN;
     writer_context.rowset_path_prefix = tablet->schema_hash_path();
 
@@ -937,7 +946,7 @@ TEST_F(RowsetTest, SegmentRewriterAutoIncrementTest) {
     std::shared_ptr<FileSystem> fs = FileSystem::CreateSharedFromString(rowset->rowset_path()).value();
     std::string file_name = Rowset::segment_file_path(rowset->rowset_path(), rowset->rowset_id(), 0);
 
-    auto partial_segment = *Segment::open(fs, file_name, 0, partial_tablet_schema);
+    auto partial_segment = *Segment::open(fs, FileInfo{file_name}, 0, partial_tablet_schema);
     ASSERT_EQ(partial_segment->num_rows(), num_rows);
 
     std::shared_ptr<TabletSchema> tablet_schema = TabletSchemaHelper::create_tablet_schema(
@@ -964,7 +973,7 @@ TEST_F(RowsetTest, SegmentRewriterAutoIncrementTest) {
     ASSERT_OK(SegmentRewriter::rewrite(file_name, dst_file_name, tablet_schema, auto_increment_partial_update_state,
                                        column_ids, &write_columns));
 
-    auto segment = *Segment::open(fs, dst_file_name, 0, tablet_schema);
+    auto segment = *Segment::open(fs, FileInfo{dst_file_name}, 0, tablet_schema);
     ASSERT_EQ(segment->num_rows(), num_rows);
 }
 

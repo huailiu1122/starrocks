@@ -28,6 +28,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DefaultCoordinator;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.scheduler.dag.JobSpec;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.LoadPlanner;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.thrift.TCompressionType;
@@ -219,7 +220,7 @@ public class JobSpecTest extends SchedulerTestBase {
         jobSpec = coordinator.getJobSpec();
         Assert.assertEquals(loadMemLimit, jobSpec.getQueryOptions().getLoad_mem_limit());
         Assert.assertTrue(jobSpec.getQueryOptions().isSetMem_limit());
-        Assert.assertFalse(jobSpec.getQueryOptions().isSetQuery_mem_limit());
+        Assert.assertTrue(jobSpec.getQueryOptions().isSetQuery_mem_limit());
     }
 
     @Test
@@ -289,61 +290,7 @@ public class JobSpecTest extends SchedulerTestBase {
         jobSpec = coordinator.getJobSpec();
         Assert.assertEquals(loadMemLimit, jobSpec.getQueryOptions().getLoad_mem_limit());
         Assert.assertTrue(jobSpec.getQueryOptions().isSetMem_limit());
-        Assert.assertFalse(jobSpec.getQueryOptions().isSetQuery_mem_limit());
-    }
-
-    @Test
-    public void testFromNonPipelineBrokerLoadJobSpec() throws Exception {
-        Config.enable_pipeline_load = false;
-
-        // Prepare input arguments.
-        String sql = "insert into lineitem select * from lineitem";
-        ExecPlan execPlan = getExecPlan(sql);
-
-        long loadJobId = 1L;
-        TUniqueId queryId = new TUniqueId(2, 3);
-        DescriptorTable descTable = new DescriptorTable();
-        List<PlanFragment> fragments = execPlan.getFragments();
-        List<ScanNode> scanNodes = execPlan.getScanNodes();
-        String timezone = connectContext.getSessionVariable().getTimeZone();
-        long startTime = connectContext.getStartTime();
-        Map<String, String> sessionVariables = ImmutableMap.of();
-        long execMemLimit = 4L;
-
-        DefaultCoordinator coordinator = COORDINATOR_FACTORY.createNonPipelineBrokerLoadScheduler(
-                loadJobId, queryId, descTable, fragments, scanNodes, timezone, startTime,
-                sessionVariables,
-                connectContext,
-                execMemLimit);
-        JobSpec jobSpec = coordinator.getJobSpec();
-
-        // Check created jobSpec.
-        Assert.assertEquals(loadJobId, jobSpec.getLoadJobId());
-        Assert.assertEquals(queryId, jobSpec.getQueryId());
-        Assert.assertEquals(TQueryType.LOAD, jobSpec.getQueryOptions().getQuery_type());
-        Assert.assertEquals(execMemLimit, jobSpec.getQueryOptions().getMem_limit());
-        Assert.assertEquals(execMemLimit, jobSpec.getQueryOptions().getLoad_mem_limit());
-        Assert.assertFalse(jobSpec.isEnablePipeline());
-        Assert.assertFalse(jobSpec.isEnableStreamPipeline());
-        Assert.assertTrue(jobSpec.isBlockQuery());
-        Assert.assertEquals(LOAD_RESOURCE_GROUP, jobSpec.getResourceGroup());
-
-        // Check created jobSpec for sessionVariables.
-        Assert.assertFalse(jobSpec.getQueryOptions().isSetLoad_transmission_compression_type());
-        Assert.assertFalse(jobSpec.getQueryOptions().isSetLog_rejected_record_num());
-
-        sessionVariables = ImmutableMap.of(
-                SessionVariable.LOAD_TRANSMISSION_COMPRESSION_TYPE, "LZ4",
-                BulkLoadJob.LOG_REJECTED_RECORD_NUM_SESSION_VARIABLE_KEY, "10"
-        );
-        coordinator = COORDINATOR_FACTORY.createNonPipelineBrokerLoadScheduler(
-                loadJobId, queryId, descTable, fragments, scanNodes, timezone, startTime,
-                sessionVariables,
-                connectContext,
-                execMemLimit);
-        jobSpec = coordinator.getJobSpec();
-        Assert.assertEquals(TCompressionType.LZ4, jobSpec.getQueryOptions().getLoad_transmission_compression_type());
-        Assert.assertEquals(10L, jobSpec.getQueryOptions().getLog_rejected_record_num());
+        Assert.assertTrue(jobSpec.getQueryOptions().isSetQuery_mem_limit());
     }
 
     @Test
@@ -365,7 +312,7 @@ public class JobSpecTest extends SchedulerTestBase {
         DefaultCoordinator coordinator = COORDINATOR_FACTORY.createBrokerExportScheduler(
                 loadJobId, queryId, descTable, fragments, scanNodes, timezone, startTime,
                 sessionVariables,
-                execMemLimit);
+                execMemLimit, WarehouseManager.DEFAULT_WAREHOUSE_ID);
         JobSpec jobSpec = coordinator.getJobSpec();
 
         // Check created jobSpec.
@@ -388,7 +335,7 @@ public class JobSpecTest extends SchedulerTestBase {
         coordinator = COORDINATOR_FACTORY.createBrokerExportScheduler(
                 loadJobId, queryId, descTable, fragments, scanNodes, timezone, startTime,
                 sessionVariables,
-                execMemLimit);
+                execMemLimit, WarehouseManager.DEFAULT_WAREHOUSE_ID);
         jobSpec = coordinator.getJobSpec();
 
         Assert.assertEquals(TCompressionType.LZ4, jobSpec.getQueryOptions().getLoad_transmission_compression_type());

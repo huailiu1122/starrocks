@@ -15,6 +15,7 @@
 package com.starrocks.privilege;
 
 import com.starrocks.catalog.InternalCatalog;
+import com.starrocks.privilege.ranger.RangerAccessController;
 import com.starrocks.sql.analyzer.AuthorizerStmtVisitor;
 
 import java.util.Map;
@@ -22,9 +23,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class AccessControlProvider {
     protected final AuthorizerStmtVisitor privilegeCheckerVisitor;
-    public final Map<String, AccessControl> catalogToAccessControl;
+    public final Map<String, AccessController> catalogToAccessControl;
 
-    public AccessControlProvider(AuthorizerStmtVisitor privilegeCheckerVisitor, AccessControl accessControl) {
+    public AccessControlProvider(AuthorizerStmtVisitor privilegeCheckerVisitor, AccessController accessControl) {
         this.privilegeCheckerVisitor = privilegeCheckerVisitor;
 
         this.catalogToAccessControl = new ConcurrentHashMap<>();
@@ -35,12 +36,12 @@ public class AccessControlProvider {
         return privilegeCheckerVisitor;
     }
 
-    public AccessControl getAccessControlOrDefault(String catalogName) {
+    public AccessController getAccessControlOrDefault(String catalogName) {
         if (catalogName == null) {
             return catalogToAccessControl.get(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME);
         }
 
-        AccessControl catalogAccessController = catalogToAccessControl.get(catalogName);
+        AccessController catalogAccessController = catalogToAccessControl.get(catalogName);
         if (catalogAccessController != null) {
             return catalogAccessController;
         } else {
@@ -48,11 +49,25 @@ public class AccessControlProvider {
         }
     }
 
-    public void setAccessControl(String catalog, AccessControl accessControl) {
-        catalogToAccessControl.put(catalog, accessControl);
+    public void setAccessControl(String catalog, AccessController accessControl) {
+        AccessController obsoleteAccessController = catalogToAccessControl.put(catalog, accessControl);
+        if (obsoleteAccessController instanceof RangerAccessController) {
+            // Clean up Ranger related threads and context
+            ((RangerAccessController) obsoleteAccessController).getRangerPlugin().cleanup();
+        }
     }
 
     public void removeAccessControl(String catalog) {
+        AccessController accessController = catalogToAccessControl.get(catalog);
+        if (accessController == null) {
+            return;
+        }
+
         catalogToAccessControl.remove(catalog);
+
+        if (accessController instanceof RangerAccessController) {
+            // Clean up Ranger related threads and context
+            ((RangerAccessController) accessController).getRangerPlugin().cleanup();
+        }
     }
 }

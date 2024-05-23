@@ -53,7 +53,10 @@ enum TDataSinkType {
     MULTI_CAST_DATA_STREAM_SINK,
     SCHEMA_TABLE_SINK,
     ICEBERG_TABLE_SINK,
-    HIVE_TABLE_SINK
+    HIVE_TABLE_SINK,
+    TABLE_FUNCTION_TABLE_SINK,
+    BLACKHOLE_TABLE_SINK,
+    DICTIONARY_CACHE_SINK
 }
 
 enum TResultSinkType {
@@ -61,7 +64,8 @@ enum TResultSinkType {
     FILE,
     STATISTIC,
     VARIABLE,
-    HTTP_PROTOCAL
+    HTTP_PROTOCAL,
+    METADATA_ICEBERG
 }
 
 enum TResultSinkFormatType {
@@ -152,6 +156,7 @@ struct TResultSink {
     1: optional TResultSinkType type;
     2: optional TResultFileSinkOptions file_options;
     3: optional TResultSinkFormatType format;
+    4: optional bool is_binary_row;
 }
 
 struct TMysqlTableSink {
@@ -184,6 +189,15 @@ struct TExportSink {
     30: optional string file_name_prefix
 }
 
+struct TDictionaryCacheSink {
+    1: optional list<Types.TNetworkAddress> nodes
+    2: optional i64 dictionary_id
+    3: optional i64 txn_id
+    4: optional Descriptors.TOlapTableSchemaParam schema
+    5: optional i64 memory_limit
+    6: optional i32 key_size
+}
+
 struct TOlapTableSink {
     1: required Types.TUniqueId load_id
     2: required i64 txn_id
@@ -214,6 +228,7 @@ struct TOlapTableSink {
     // enable colocated for sync mv 
     27: optional bool enable_colocate_mv_index 
     28: optional i64 automatic_bucket_size
+    29: optional bool write_txn_log
 }
 
 struct TSchemaTableSink {
@@ -228,6 +243,7 @@ struct TIcebergTableSink {
     4: optional Types.TCompressionType compression_type
     5: optional bool is_static_partition_sink
     6: optional CloudConfiguration.TCloudConfiguration cloud_configuration
+    7: optional i64 target_max_file_size
 }
 
 struct THiveTableSink {
@@ -238,6 +254,13 @@ struct THiveTableSink {
     5: optional Types.TCompressionType compression_type
     6: optional bool is_static_partition_sink
     7: optional CloudConfiguration.TCloudConfiguration cloud_configuration
+    8: optional i64 target_max_file_size
+    9: optional Descriptors.TTextFileDesc text_file_desc // for textfile format
+}
+
+struct TTableFunctionTableSink {
+    1: optional Descriptors.TTableFunctionTable target_table
+    2: optional CloudConfiguration.TCloudConfiguration cloud_configuration
 }
 
 struct TDataSink {
@@ -252,4 +275,6 @@ struct TDataSink {
   10: optional TSchemaTableSink schema_table_sink
   11: optional TIcebergTableSink iceberg_table_sink
   12: optional THiveTableSink hive_table_sink
+  13: optional TTableFunctionTableSink table_function_table_sink
+  14: optional TDictionaryCacheSink dictionary_cache_sink
 }

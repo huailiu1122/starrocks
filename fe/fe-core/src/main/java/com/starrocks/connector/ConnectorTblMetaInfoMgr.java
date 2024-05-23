@@ -15,13 +15,17 @@
 package com.starrocks.connector;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.HashBasedTable;
-import com.google.common.collect.Maps;
+import com.google.common.collect.Ordering;
 import com.google.common.collect.Table;
+import com.google.common.collect.TreeBasedTable;
+import com.google.gson.JsonObject;
+import com.starrocks.analysis.TableName;
+import com.starrocks.common.util.concurrent.FairReentrantReadWriteLock;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class ConnectorTblMetaInfoMgr {
@@ -33,8 +37,8 @@ public class ConnectorTblMetaInfoMgr {
     private final ReentrantReadWriteLock lock;
 
     public ConnectorTblMetaInfoMgr() {
-        connectorTableMetaInfos = HashBasedTable.create();
-        lock = new ReentrantReadWriteLock();
+        connectorTableMetaInfos = TreeBasedTable.create(Ordering.natural(), String.CASE_INSENSITIVE_ORDER);
+        lock = new FairReentrantReadWriteLock();
     }
 
     public ConnectorTableInfo getConnectorTableInfo(String catalog, String db, String tableIdentifier) {
@@ -53,7 +57,7 @@ public class ConnectorTblMetaInfoMgr {
         try {
             Map<String, ConnectorTableInfo> tableInfoMap = connectorTableMetaInfos.get(catalog, db);
             if (tableInfoMap == null) {
-                tableInfoMap = Maps.newHashMap();
+                tableInfoMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
             }
 
             ConnectorTableInfo tableInfo = tableInfoMap.get(tableIdentifier);
@@ -85,6 +89,12 @@ public class ConnectorTblMetaInfoMgr {
                 return;
             }
             tableInfo.removeMetaInfo(connectorTableInfo);
+            if (tableInfo.empty()) {
+                tableInfoMap.remove(tableIdentifier);
+            }
+            if (tableInfoMap.isEmpty()) {
+                connectorTableMetaInfos.remove(catalog, db);
+            }
             LOG.info("{}.{}.{} remove persistent connector table info : {}", catalog, db, tableIdentifier,
                     connectorTableInfo);
         } finally {
@@ -99,6 +109,27 @@ public class ConnectorTblMetaInfoMgr {
         ConnectorTableInfo tableInfo = getConnectorTableInfo(catalog, db, tableIdentifier);
         if (tableInfo != null) {
             tableInfo.seTableInfoForConnectorTable(table);
+        }
+    }
+
+    /**
+     * A debugging interface for dump the content as JSON
+     */
+    public String inspect() {
+        readLock();
+        try {
+            JsonObject res = new JsonObject();
+            connectorTableMetaInfos.cellSet().forEach(cell -> {
+                String catalog = cell.getRowKey();
+                String db = cell.getColumnKey();
+                cell.getValue().forEach((tableName, tableInfo) -> {
+                    TableName key = new TableName(catalog, db, tableName);
+                    res.add(key.toString(), tableInfo.inspect());
+                });
+            });
+            return res.toString();
+        } finally {
+            readUnlock();
         }
     }
 

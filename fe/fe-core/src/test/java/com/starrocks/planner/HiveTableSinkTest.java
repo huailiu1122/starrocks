@@ -20,9 +20,11 @@ import com.starrocks.analysis.TupleId;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.HiveTable;
 import com.starrocks.catalog.Type;
+import com.starrocks.common.ExceptionChecker;
 import com.starrocks.connector.CatalogConnector;
 import com.starrocks.connector.ConnectorMgr;
 import com.starrocks.connector.ConnectorTableId;
+import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.hive.HiveStorageFormat;
 import com.starrocks.credential.CloudConfigurationFactory;
 import com.starrocks.qe.SessionVariable;
@@ -76,8 +78,8 @@ public class HiveTableSinkTest {
 
         new Expectations() {
             {
-                hiveConnector.getCloudConfiguration();
-                result = CloudConfigurationFactory.buildDefaultCloudConfiguration();
+                hiveConnector.getMetadata().getCloudConfiguration();
+                result = CloudConfigurationFactory.buildCloudConfigurationForStorage(new HashMap<>());
                 minTimes = 1;
             }
         };
@@ -109,8 +111,13 @@ public class HiveTableSinkTest {
         Assert.assertEquals("parquet", tHiveTableSink.getFile_format());
         Assert.assertEquals("c1", tHiveTableSink.getData_column_names().get(0));
         Assert.assertEquals("p1", tHiveTableSink.getPartition_column_names().get(0));
-        Assert.assertEquals(TCompressionType.GZIP, tHiveTableSink.getCompression_type());
+        Assert.assertEquals(TCompressionType.NO_COMPRESSION, tHiveTableSink.getCompression_type());
         Assert.assertTrue(tHiveTableSink.is_static_partition_sink);
         Assert.assertEquals(TCloudType.DEFAULT, tHiveTableSink.getCloud_configuration().cloud_type);
+
+        builder.setStorageFormat(HiveStorageFormat.AVRO);
+        ExceptionChecker.expectThrowsWithMsg(StarRocksConnectorException.class,
+                "Writing to hive table in [AVRO] format is not supported",
+                () ->new HiveTableSink(builder.build(), desc, true, new SessionVariable()));
     }
 }

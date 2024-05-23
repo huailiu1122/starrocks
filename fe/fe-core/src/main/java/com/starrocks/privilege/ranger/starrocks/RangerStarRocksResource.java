@@ -15,46 +15,49 @@
 package com.starrocks.privilege.ranger.starrocks;
 
 import com.starrocks.privilege.ObjectType;
+import com.starrocks.privilege.ranger.RangerAccessResourceBuilder;
 import org.apache.ranger.plugin.policyengine.RangerAccessResourceImpl;
 
-import java.util.List;
-import java.util.Locale;
-
 public class RangerStarRocksResource extends RangerAccessResourceImpl {
-    public RangerStarRocksResource(ObjectType objectType, List<String> objectTokens) {
-        if (objectType.equals(ObjectType.CATALOG)) {
-            setValue(ObjectType.CATALOG.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-        } else if (objectType.equals(ObjectType.DATABASE)) {
-            setValue(ObjectType.CATALOG.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-            setValue(ObjectType.DATABASE.name().toLowerCase(Locale.ENGLISH), objectTokens.get(1));
-        } else if (objectType.equals(ObjectType.TABLE)) {
-            setValue(ObjectType.CATALOG.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-            setValue(ObjectType.DATABASE.name().toLowerCase(Locale.ENGLISH), objectTokens.get(1));
-            setValue(ObjectType.TABLE.name().toLowerCase(Locale.ENGLISH), objectTokens.get(2));
-        } else if (objectType.equals(ObjectType.VIEW)) {
-            setValue(ObjectType.DATABASE.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-            setValue(ObjectType.VIEW.name().toLowerCase(Locale.ENGLISH), objectTokens.get(1));
-        } else if (objectType.equals(ObjectType.MATERIALIZED_VIEW)) {
-            setValue(ObjectType.DATABASE.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-            setValue(ObjectType.MATERIALIZED_VIEW.name().toLowerCase(Locale.ENGLISH), objectTokens.get(1));
-        } else if (objectType.equals(ObjectType.FUNCTION)) {
-            setValue(ObjectType.DATABASE.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-            setValue(ObjectType.FUNCTION.name().toLowerCase(Locale.ENGLISH), objectTokens.get(1));
-        } else if (objectType.equals(ObjectType.GLOBAL_FUNCTION)) {
-            setValue(ObjectType.GLOBAL_FUNCTION.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-        } else if (objectType.equals(ObjectType.RESOURCE)) {
-            setValue(ObjectType.RESOURCE.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-        } else if (objectType.equals(ObjectType.RESOURCE_GROUP)) {
-            setValue(ObjectType.RESOURCE_GROUP.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
-        } else if (objectType.equals(ObjectType.STORAGE_VOLUME)) {
-            setValue(ObjectType.STORAGE_VOLUME.name().toLowerCase(Locale.ENGLISH), objectTokens.get(0));
+    static class RangerStarRocksAccessResourceBuilder extends RangerAccessResourceBuilder {
+        private RangerStarRocksAccessResourceBuilder() {
+            super(new RangerStarRocksResource());
+        }
+
+        public String convertToRangerType(ObjectType objectType) {
+            if (objectType.equals(ObjectType.SYSTEM)) {
+                return "system";
+            } else if (objectType.equals(ObjectType.USER)) {
+                return "user";
+            } else if (objectType.equals(ObjectType.CATALOG)) {
+                return "catalog";
+            } else if (objectType.equals(ObjectType.DATABASE)) {
+                return "database";
+            } else if (objectType.equals(ObjectType.TABLE)) {
+                return "table";
+            } else if (objectType.equals(ObjectType.VIEW)) {
+                return "view";
+            } else if (objectType.equals(ObjectType.MATERIALIZED_VIEW)) {
+                return "materialized_view";
+            } else if (objectType.equals(ObjectType.FUNCTION)) {
+                return "function";
+            } else if (objectType.equals(ObjectType.GLOBAL_FUNCTION)) {
+                return "global_function";
+            } else if (objectType.equals(ObjectType.RESOURCE)) {
+                return "resource";
+            } else if (objectType.equals(ObjectType.RESOURCE_GROUP)) {
+                return "resource_group";
+            } else if (objectType.equals(ObjectType.STORAGE_VOLUME)) {
+                return "storage_volume";
+            } else if (objectType.equals(ObjectType.PIPE)) {
+                return "pipe";
+            } else {
+                return "unknown";
+            }
         }
     }
 
-    public RangerStarRocksResource(String catalogName, String dbName, String tableName, String columnName) {
-        setValue(ObjectType.CATALOG.name().toLowerCase(Locale.ENGLISH), catalogName);
-        setValue(ObjectType.DATABASE.name().toLowerCase(Locale.ENGLISH), dbName);
-        setValue(ObjectType.TABLE.name().toLowerCase(Locale.ENGLISH), tableName);
-        setValue("column", columnName);
+    public static RangerAccessResourceBuilder builder() {
+        return new RangerStarRocksAccessResourceBuilder();
     }
 }

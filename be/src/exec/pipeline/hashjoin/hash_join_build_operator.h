@@ -62,8 +62,9 @@ public:
 protected:
     HashJoinerPtr _join_builder;
     PartialRuntimeFilterMerger* _partial_rf_merger;
-    mutable size_t _avg_keys_perf_bucket = 0;
+    mutable size_t _avg_keys_per_bucket = 0;
     std::atomic<bool> _is_finished = false;
+    DECLARE_ONCE_DETECTOR(_set_finishing_once);
 
     const TJoinDistributionMode::type _distribution_mode;
 };

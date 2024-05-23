@@ -208,6 +208,7 @@ struct AggregatorParams {
     bool needs_finalize;
     bool has_outer_join_child;
     int64_t limit;
+    bool enable_pipeline_share_limit;
     TStreamingPreaggregationMode::type streaming_preaggregation_mode;
     TupleId intermediate_tuple_id;
     TupleId output_tuple_id;
@@ -261,8 +262,8 @@ public:
         }
     }
 
-    virtual Status open(RuntimeState* state);
-    Status prepare(RuntimeState* state, ObjectPool* pool, RuntimeProfile* runtime_profile);
+    [[nodiscard]] virtual Status open(RuntimeState* state);
+    [[nodiscard]] Status prepare(RuntimeState* state, ObjectPool* pool, RuntimeProfile* runtime_profile);
     void close(RuntimeState* state) override;
 
     const MemPool* mem_pool() const { return _mem_pool.get(); }
@@ -330,14 +331,14 @@ public:
     [[nodiscard]] Status compute_batch_agg_states_with_selection(Chunk* chunk, size_t chunk_size);
 
     // Convert one row agg states to chunk
-    Status convert_to_chunk_no_groupby(ChunkPtr* chunk);
+    [[nodiscard]] Status convert_to_chunk_no_groupby(ChunkPtr* chunk);
 
     void process_limit(ChunkPtr* chunk);
 
-    Status evaluate_groupby_exprs(Chunk* chunk);
-    Status evaluate_agg_fn_exprs(Chunk* chunk);
-    Status evaluate_agg_fn_exprs(Chunk* chunk, bool use_intermediate);
-    Status evaluate_agg_input_column(Chunk* chunk, std::vector<ExprContext*>& agg_expr_ctxs, int i);
+    [[nodiscard]] Status evaluate_groupby_exprs(Chunk* chunk);
+    [[nodiscard]] Status evaluate_agg_fn_exprs(Chunk* chunk);
+    [[nodiscard]] Status evaluate_agg_fn_exprs(Chunk* chunk, bool use_intermediate);
+    [[nodiscard]] Status evaluate_agg_input_column(Chunk* chunk, std::vector<ExprContext*>& agg_expr_ctxs, int i);
 
     [[nodiscard]] Status output_chunk_by_streaming(Chunk* input_chunk, ChunkPtr* chunk);
 
@@ -357,7 +358,7 @@ public:
     void try_convert_to_two_level_map();
     void try_convert_to_two_level_set();
 
-    Status check_has_error();
+    [[nodiscard]] Status check_has_error();
 
     void set_aggr_mode(AggrMode aggr_mode) { _aggr_mode = aggr_mode; }
     // reset_state is used to clear the internal state of the Aggregator, then it can process new tablet, in
@@ -366,7 +367,9 @@ public:
     // to produce the final result that will be populated into the cache.
     // refill_chunk: partial-hit result of stale version.
     // refill_op: pre-cache agg operator, Aggregator's holder.
-    Status reset_state(RuntimeState* state, const std::vector<ChunkPtr>& refill_chunks, pipeline::Operator* refill_op);
+    // reset_sink_complete: reset sink_complete state. sometimes if operator sink has complete we don't have to reset sink state
+    [[nodiscard]] Status reset_state(RuntimeState* state, const std::vector<ChunkPtr>& refill_chunks,
+                                     pipeline::Operator* refill_op, bool reset_sink_complete = true);
 
     const AggregatorParamsPtr& params() const { return _params; }
 
@@ -377,8 +380,6 @@ public:
 
     const SpillProcessChannelPtr spill_channel() const { return _spill_channel; }
     void set_spill_channel(SpillProcessChannelPtr channel) { _spill_channel = std::move(channel); }
-
-    auto& io_executor() { return *spill_channel()->io_executor(); }
 
     Status spill_aggregate_data(RuntimeState* state, std::function<StatusOr<ChunkPtr>()> chunk_provider);
 
@@ -425,7 +426,7 @@ protected:
     bool _needs_finalize;
     // Indicate whether data of the hash table has been taken out or reach limit
     bool _is_ht_eos = false;
-    bool _streaming_all_states = false;
+    std::atomic_bool _streaming_all_states = false;
     bool _is_only_group_by_columns = false;
     // At least one group by column is nullable
     bool _has_nullable_key = false;
@@ -495,19 +496,27 @@ protected:
 
     std::shared_ptr<spill::Spiller> _spiller;
     SpillProcessChannelPtr _spill_channel;
+    bool _is_opened = false;
+    bool _is_prepared = false;
 
 public:
     void build_hash_map(size_t chunk_size, bool agg_group_by_with_limit = false);
+    void build_hash_map(size_t chunk_size, std::atomic<int64_t>& shared_limit_countdown, bool agg_group_by_with_limit);
     void build_hash_map_with_selection(size_t chunk_size);
     void build_hash_map_with_selection_and_allocation(size_t chunk_size, bool agg_group_by_with_limit = false);
-    Status convert_hash_map_to_chunk(int32_t chunk_size, ChunkPtr* chunk, bool* use_intermediate_as_output = nullptr);
+    [[nodiscard]] Status convert_hash_map_to_chunk(int32_t chunk_size, ChunkPtr* chunk,
+                                                   bool* use_intermediate_as_output = nullptr);
 
     void build_hash_set(size_t chunk_size);
     void build_hash_set_with_selection(size_t chunk_size);
     void convert_hash_set_to_chunk(int32_t chunk_size, ChunkPtr* chunk);
 
+    bool is_pre_cache() { return _aggr_mode == AM_BLOCKING_PRE_CACHE || _aggr_mode == AM_STREAMING_PRE_CACHE; }
+
 protected:
     bool _reached_limit() { return _limit != -1 && _num_rows_returned >= _limit; }
+
+    void _build_hash_map_with_shared_limit(size_t chunk_size, std::atomic<int64_t>& shared_limit_countdown);
 
     bool _use_intermediate_as_input() {
         if (is_pending_reset_state()) {
@@ -523,10 +532,10 @@ protected:
         return _aggr_mode == AM_STREAMING_PRE_CACHE || _aggr_mode == AM_BLOCKING_PRE_CACHE || !_needs_finalize;
     }
 
-    Status _reset_state(RuntimeState* state);
+    [[nodiscard]] Status _reset_state(RuntimeState* state, bool reset_sink_complete);
 
     // initial const columns for i'th FunctionContext.
-    Status _evaluate_const_columns(int i);
+    [[nodiscard]] Status _evaluate_const_columns(int i);
 
     // Create new aggregate function result column by type
     Columns _create_agg_result_columns(size_t num_rows, bool use_intermediate);
@@ -547,7 +556,7 @@ protected:
     bool is_pending_reset_state() { return _is_pending_reset_state; }
 
     void _reset_exprs();
-    Status _evaluate_group_by_exprs(Chunk* chunk);
+    [[nodiscard]] Status _evaluate_group_by_exprs(Chunk* chunk);
 
     // Choose different agg hash map/set by different group by column's count, type, nullable
     template <typename HashVariantType>
@@ -612,7 +621,9 @@ class AggregatorFactoryBase {
 public:
     using Ptr = std::shared_ptr<T>;
     AggregatorFactoryBase(const TPlanNode& tnode)
-            : _tnode(tnode), _aggregator_param(convert_to_aggregator_params(_tnode)) {}
+            : _tnode(tnode), _aggregator_param(convert_to_aggregator_params(_tnode)) {
+        _shared_limit_countdown.store(_aggregator_param->limit);
+    }
 
     Ptr get_or_create(size_t id) {
         auto it = _aggregators.find(id);
@@ -632,11 +643,14 @@ public:
     const TPlanNode& t_node() { return _tnode; }
     const AggrMode aggr_mode() { return _aggr_mode; }
 
+    std::atomic<int64_t>& get_shared_limit_countdown() { return _shared_limit_countdown; }
+
 private:
     const TPlanNode& _tnode;
     AggregatorParamsPtr _aggregator_param;
     std::unordered_map<size_t, Ptr> _aggregators;
     AggrMode _aggr_mode = AggrMode::AM_DEFAULT;
+    std::atomic<int64_t> _shared_limit_countdown;
 };
 
 using AggregatorFactory = AggregatorFactoryBase<Aggregator>;

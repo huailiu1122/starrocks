@@ -1,32 +1,3 @@
-[sql]
-select
-    l_shipmode,
-    sum(case
-            when o_orderpriority = '1-URGENT'
-                or o_orderpriority = '2-HIGH'
-                then cast (1 as bigint)
-            else cast(0 as bigint)
-        end) as high_line_count,
-    sum(case
-            when o_orderpriority <> '1-URGENT'
-                and o_orderpriority <> '2-HIGH'
-                then cast (1 as bigint)
-            else cast(0 as bigint)
-        end) as low_line_count
-from
-    orders,
-    lineitem
-where
-        o_orderkey = l_orderkey
-  and l_shipmode in ('REG AIR', 'MAIL')
-  and l_commitdate < l_receiptdate
-  and l_shipdate < l_commitdate
-  and l_receiptdate >= date '1997-01-01'
-  and l_receiptdate < date '1998-01-01'
-group by
-    l_shipmode
-order by
-    l_shipmode ;
 [fragment statistics]
 PLAN FRAGMENT 0(F04)
 Output Exprs:24: l_shipmode | 28: sum | 29: sum
@@ -146,7 +117,7 @@ OutPut Exchange Id: 03
 1:HdfsScanNode
 TABLE: lineitem
 NON-PARTITION PREDICATES: 24: l_shipmode IN ('REG AIR', 'MAIL'), 21: l_commitdate < 22: l_receiptdate, 20: l_shipdate < 21: l_commitdate, 22: l_receiptdate >= '1997-01-01', 22: l_receiptdate < '1998-01-01'
-MIN/MAX PREDICATES: 30: l_shipmode >= 'MAIL', 31: l_shipmode <= 'REG AIR', 32: l_receiptdate >= '1997-01-01', 33: l_receiptdate < '1998-01-01'
+MIN/MAX PREDICATES: 24: l_shipmode >= 'MAIL', 24: l_shipmode <= 'REG AIR', 22: l_receiptdate >= '1997-01-01', 22: l_receiptdate < '1998-01-01'
 partitions=1/1
 avgRowSize=30.0
 cardinality: 6125233
