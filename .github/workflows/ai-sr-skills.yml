@@ -29,5 +29,5 @@ jobs:
     steps:
       - name: Assign PR Reviewer
         run: |
-          /var/local/env/tools/claude -p "/starrocks-assign-pr-reviewer https://github.com/${{ github.repository }}/pull/${{ github.event.number }}" || true
+          /home/disk1/nas/tools/claude -p "/starrocks-assign-pr-reviewer https://github.com/${{ github.repository }}/pull/${{ github.event.number }}" || true
 
