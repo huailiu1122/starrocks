@@ -1816,3 +1816,4 @@ The StarRocks version. Cannot be changed.
 * **Data type**: Int
 
 <VariableWarehouse />
+
