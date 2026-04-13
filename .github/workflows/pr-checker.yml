@@ -263,4 +263,4 @@ jobs:
     steps:
       - name: Assign PR Reviewer
         run: |
-          claude -p "/starrocks-assign-pr-reviewer https://github.com/${{ github.repository }}/pull/${{ github.event.number }}"
+          /usr/local/bin/claude -p "/starrocks-assign-pr-reviewer https://github.com/${{ github.repository }}/pull/${{ github.event.number }}"
