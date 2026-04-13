@@ -27,14 +27,8 @@ jobs:
       github.event.action == 'opened' &&
       !startsWith(github.head_ref, 'mergify/')
     steps:
-      - name: Debug token
-        run: |
-          if [ -n "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
-            echo "CLAUDE_CODE_OAUTH_TOKEN is set, length=${#CLAUDE_CODE_OAUTH_TOKEN}"
-          else
-            echo "CLAUDE_CODE_OAUTH_TOKEN is empty or not set"
-          fi
       - name: Assign PR Reviewer
         run: |
+          echo "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}"
           /var/local/env/tools/claude -p "/starrocks-assign-pr-reviewer https://github.com/${{ github.repository }}/pull/${{ github.event.number }}" || true
 
