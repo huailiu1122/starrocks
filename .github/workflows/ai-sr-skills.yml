@@ -1,4 +1,4 @@
-name: CLAUDE SR SKILLS
+name: AI SR SKILLS
 
 on:
   pull_request_target:
@@ -12,7 +12,7 @@ on:
       - synchronize
 
 concurrency:
-  group: CLAUDE-SKILLS-${{ github.event.number }}
+  group: AI-SR-SKILLS-${{ github.event.number }}
   cancel-in-progress: true
 
 permissions:
