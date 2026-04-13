@@ -1,4 +1,4 @@
-name: CLAUDE SKILLS
+name: CLAUDE SR SKILLS
 
 on:
   pull_request_target:
