@@ -258,7 +258,7 @@ jobs:
   assign-reviewer:
     runs-on: [self-hosted, normal]
     if: >
-      github.event.action == 'opened' &&
+      (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'edited') &&
       !startsWith(github.head_ref, 'mergify/')
     steps:
       - name: Assign PR Reviewer
