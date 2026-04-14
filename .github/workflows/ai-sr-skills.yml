@@ -3,7 +3,8 @@ name: AI SR SKILLS
 on:
   pull_request_target:
     branches:
-      - branch-ci-test-qa
+      - main
+      - "branch*"
     types:
       - opened
       - reopened
