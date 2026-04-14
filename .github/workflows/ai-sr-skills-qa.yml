@@ -2,9 +2,6 @@ name: AI SR SKILLS
 
 on:
   pull_request_target:
-    branches:
-      - main
-      - "branch*"
     types:
       - opened
       - reopened
