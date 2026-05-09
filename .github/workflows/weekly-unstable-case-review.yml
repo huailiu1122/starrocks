@@ -171,6 +171,8 @@ jobs:
         run: |
           rm -rf ./ci-tool && cp -rf /var/lib/ci-tool ./ci-tool && cd ci-tool && git pull >/dev/null && source lib/init.sh
           ./bin/elastic-cluster.sh --template ci-admit --linuxdistro ubuntu
+          # Save deploy conf before later steps re-copy ci-tool and overwrite it
+          cp conf/starrocks_deploy.conf /tmp/weekly_review_deploy.conf
           _oss="/var/local/env/ossutil64 --config-file /root/.ossutilconfig"
           _base="oss://starrocks-ci-release/${BRANCH}/Release/inspection/pr/ubuntu"
           # Sort by modification time (line starts with date), take latest BE to get the commit SHA
@@ -218,7 +220,10 @@ jobs:
         if: always()
         run: |
           cd ci-tool && source lib/init.sh
+          # Restore deploy conf saved before backup_log step re-copied ci-tool
+          [[ -f /tmp/weekly_review_deploy.conf ]] && cp /tmp/weekly_review_deploy.conf conf/starrocks_deploy.conf
           ./bin/elastic-cluster.sh --delete || true
+          rm -f /tmp/weekly_review_deploy.conf || true
 
       - name: Clean ENV
         if: always()
